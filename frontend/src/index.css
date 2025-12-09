@@ -1,0 +1,91 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Backgrounds */
+    --background: 210 40% 98%;        /* #F8FAFC - Off-white */
+    --foreground: 215 25% 15%;        /* #1E293B - Dark slate */
+    
+    /* Cards & Surfaces */
+    --card: 0 0% 100%;                /* #FFFFFF */
+    --card-foreground: 215 25% 15%;
+    
+    /* Popovers & Dropdowns */
+    --popover: 0 0% 100%;
+    --popover-foreground: 215 25% 15%;
+    
+    /* Primary - Deep Navy */
+    --primary: 213 54% 24%;           /* #1E3A5F */
+    --primary-foreground: 0 0% 100%;
+    
+    /* Secondary - Light Slate */
+    --secondary: 210 40% 93%;         /* #E2E8F0 */
+    --secondary-foreground: 215 25% 27%;
+    
+    /* Muted - Subtle backgrounds */
+    --muted: 210 40% 96%;             /* #F1F5F9 */
+    --muted-foreground: 215 16% 47%;  /* #64748B */
+    
+    /* Accent - Amber/Orange */
+    --accent: 38 92% 50%;             /* #F59E0B */
+    --accent-foreground: 213 54% 24%;
+    
+    /* Destructive - Error states */
+    --destructive: 0 84% 60%;         /* #EF4444 */
+    --destructive-foreground: 0 0% 100%;
+    
+    /* Success - Confirmations */
+    --success: 142 76% 36%;           /* #16A34A */
+    --success-foreground: 0 0% 100%;
+    
+    /* Warning - Alerts */
+    --warning: 38 92% 50%;            /* #F59E0B */
+    --warning-foreground: 213 54% 24%;
+    
+    /* Borders & Inputs */
+    --border: 214 32% 91%;            /* #E2E8F0 */
+    --input: 214 32% 91%;
+    --ring: 213 54% 24%;              /* Focus ring - Primary */
+    
+    /* Radius */
+    --radius: 0.5rem;
+    
+    /* Tier Badge Colors */
+    --tier-low: 142 76% 36%;          /* Green - #16A34A */
+    --tier-mid: 38 92% 50%;           /* Amber - #F59E0B */
+    --tier-high: 262 83% 58%;         /* Purple - #8B5CF6 */
+  }
+  
+  /* Dark mode variables ready for future implementation */
+  /* Uncomment when implementing dark mode:
+  .dark {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+    ...
+  }
+  */
+  
+  * {
+    @apply border-border;
+  }
+  
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  
+  /* Focus styles for accessibility */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer utilities {
+  /* Custom utility classes */
+  .text-balance {
+    text-wrap: balance;
+  }
+}
