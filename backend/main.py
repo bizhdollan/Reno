@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+from src.api.v1.chat import router as chat_router
+
 
 app = FastAPI(
     title="RenovationTech API",
@@ -16,6 +18,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# API routes
+app.include_router(chat_router)
 
 
 @app.get("/")
