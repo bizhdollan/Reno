@@ -33,7 +33,8 @@ class ChatMessage(BaseModel):
 class ChatResponse(BaseModel):
     """Response returned to the frontend chat UI."""
 
-    assistant: str = Field(..., description="Assistant reply text")
+    # Assistant reply can be plain text or structured content (e.g., tier cards)
+    assistant: Any = Field(..., description="Assistant reply (text or structured content)")
     state: ProjectState = Field(..., description="Updated project state after this turn")
 
 
@@ -56,6 +57,8 @@ async def chat(payload: ChatMessage) -> ChatResponse:
         f"message_type={'list' if isinstance(payload.message, list) else 'str'} | "
         f"state_current_stage={state.get('current_stage')}"
     )
+    # Log raw user input for debugging
+    print(f"[chat] user_input={payload.message!r}")
 
     try:
         new_state, assistant_reply = await run_conversation(
@@ -86,6 +89,8 @@ async def chat(payload: ChatMessage) -> ChatResponse:
         f"zip={serializable_state.get('zip_code')} | "
         f"assistant_reply_len={len(assistant_reply or '')}"
     )
+    # Log assistant reply for debugging
+    print(f"[chat] assistant_reply={assistant_reply!r}")
 
     # Cache state for subsequent turns
     _STATE_STORE[project_id] = serializable_state

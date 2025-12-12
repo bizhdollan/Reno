@@ -1,121 +1,122 @@
 """
 LangGraph State Schema for Renovation Estimation.
 
-Stages:
+4-Stage Architecture:
 1. project_basics - Collect title, type, zip_code
-2. visual_collection - Upload images, extract details, confirm
-3. material_verification - Verify extracted materials
-4. measurement_verification - Verify measurements
-5. final_review - User confirms all data
-6. cost_estimation - Generate estimate
+2. image_analysis_generation - Analyze images, confirm info, generate preview
+3. final_review - Review all confirmed data before estimation
+4. cost_estimation - Generate 3-tier cost estimate
 """
 
-from typing import TypedDict, Literal, Annotated
+from typing import TypedDict, Literal, Annotated, Any
 from langgraph.graph.message import add_messages
 
 
-# Stage type
+# Stage types
 Stage = Literal[
     "project_basics",
-    "visual_collection", 
-    "material_verification",
-    "measurement_verification",
+    "image_analysis_generation",
     "final_review",
     "cost_estimation",
     "completed"
 ]
 
+# Sub-states for image_analysis_generation stage
+ImageSubState = Literal[
+    "analyzing",        # Processing uploaded images
+    "confirming",       # Back-and-forth confirmation loop
+    "generating",       # Generating preview image
+    "image_confirmation"  # User reviewing generated image
+]
+
 
 class ImageData(TypedDict, total=False):
-    """Data extracted from a single image."""
+    """Data for a single uploaded image."""
     id: str
     url: str  # base64 data URL or file path
-    extracted: dict  # AI-extracted information
-    confirmed: bool  # User confirmed extraction
+    analyzed: bool  # Whether image has been analyzed
 
 
-class MaterialItem(TypedDict, total=False):
-    """A single material item."""
-    name: str
-    type: str  # e.g., "granite", "oak", "ceramic"
-    quantity: float
-    unit: str  # e.g., "sqft", "linear ft", "pieces"
-    unit_cost: float
-    confirmed: bool
+class ExtractedData(TypedDict, total=False):
+    """All data extracted from images in single pass."""
+    materials: list[dict]  # [{name, type, finish, condition, dimensions, confidence}]
+    measurements: dict  # {room_width, room_length, room_height, area_sqft, ...}
+    colors: list[dict]  # [{element, color, finish}]
+    fixtures: list[dict]  # [{name, type, brand, condition}]
+    appliances: list[dict]  # [{name, type, brand, condition}]
+    style: dict  # {overall_style, condition, age_estimate}
+    other: list[dict]  # Any other relevant details
 
 
-class Measurements(TypedDict, total=False):
-    """Room/scope measurements."""
-    width: float
-    length: float
-    height: float
-    area_sqft: float
-    unit: str  # "ft" or "m"
-    confirmed: bool
+class ConfirmationStatus(TypedDict, total=False):
+    """Track what has been confirmed by user."""
+    materials: bool
+    measurements: bool
+    colors: bool
+    fixtures: bool
+    appliances: bool
+    style: bool
+    other: bool
+    all_confirmed: bool  # True when everything is confirmed
 
 
-class Scope(TypedDict, total=False):
-    """What is being renovated."""
-    type: str  # "kitchen", "bathroom", etc.
+class CategoryBreakdown(TypedDict, total=False):
+    """Cost breakdown for a single category."""
+    category: str  # "Cabinets", "Countertops", "Flooring", etc.
     description: str
-    dimensions: Measurements
-    materials: list[MaterialItem]
-
-
-class CostEstimate(TypedDict, total=False):
-    """Final cost estimate."""
+    materials_cost: float
     labor_cost: float
-    material_cost: float
-    overhead: float
     total: float
-    breakdown: list[dict]
-    confidence: float  # 0-1
 
 
-class PendingConfirmation(TypedDict):
-    """Item awaiting user confirmation."""
-    field: str  # What field this relates to
-    extracted_value: str  # What AI thinks it is
-    confidence: float  # How confident AI is (0-1)
-    source_image_id: str | None  # Which image it came from
+class CostTier(TypedDict, total=False):
+    """Single tier in 3-tier cost structure."""
+    id: str  # "low", "mid", "high"
+    name: str  # "Low Tier", "Mid Tier", "High Tier"
+    badge: str  # "Budget-Friendly", "Recommended", "Premium"
+    description: str
+    total_cost: float  # COGS + markup
+    cogs: float  # Cost of Goods Sold
+    markup_percentage: float  # 20, 35, 50
+    markup_amount: float
+    included_items: list[str]  # ["Cabinets", "Countertops", ...]
+    detailed_breakdown: list[CategoryBreakdown]
 
 
 class ProjectState(TypedDict, total=False):
     """
     Main state for the renovation estimation graph.
-    
-    This state flows through all nodes and persists between interactions.
     """
     # Conversation history
     messages: Annotated[list[dict], add_messages]
     
     # Stage tracking
     current_stage: Stage
+    image_sub_state: ImageSubState  # Sub-state within image_analysis_generation
     
     # Project basics (stage 1)
     project_title: str | None
     project_type: str | None
     zip_code: str | None
     
-    # Visual collection (stage 2)
-    images: list[ImageData]
-    pending_confirmations: list[PendingConfirmation]
+    # Image analysis (stage 2)
+    images: list[ImageData]  # Uploaded images
+    extracted_data: ExtractedData  # All extracted info from images
+    confirmation_status: ConfirmationStatus  # What's been confirmed
+    current_confirmation_section: str | None  # Which section is being confirmed
     
-    # Scope - what's being renovated
-    scope: Scope
+    # Generated image
+    generate_image: bool  # Flag to enable/disable image generation
+    generated_image_url: str | None  # URL of generated/placeholder image
+    image_generation_feedback: list[str]  # User feedback for regeneration
     
-    # Materials (stage 3)
-    materials: list[MaterialItem]
-    
-    # Measurements (stage 4)
-    measurements: Measurements
-    
-    # Final estimate (stage 6)
-    estimate: CostEstimate | None
+    # Cost estimation (stage 4)
+    cost_tiers: list[CostTier] | None  # 3-tier options
+    selected_tier: str | None  # User's selected tier id
     
     # Control flags
-    user_confirmed_continue: bool  # User said "continue" to next stage
-    awaiting_user_input: bool  # Graph is paused for user response
+    user_confirmed_continue: bool
+    awaiting_user_input: bool
 
 
 def create_initial_state() -> ProjectState:
@@ -123,15 +124,28 @@ def create_initial_state() -> ProjectState:
     return ProjectState(
         messages=[],
         current_stage="project_basics",
+        image_sub_state="analyzing",
         project_title=None,
         project_type=None,
         zip_code=None,
         images=[],
-        pending_confirmations=[],
-        scope={},
-        materials=[],
-        measurements={},
-        estimate=None,
+        extracted_data={},
+        confirmation_status={
+            "materials": False,
+            "measurements": False,
+            "colors": False,
+            "fixtures": False,
+            "appliances": False,
+            "style": False,
+            "other": False,
+            "all_confirmed": False
+        },
+        current_confirmation_section=None,
+        generate_image=False,  # Disabled by default
+        generated_image_url=None,
+        image_generation_feedback=[],
+        cost_tiers=None,
+        selected_tier=None,
         user_confirmed_continue=False,
         awaiting_user_input=True
     )
@@ -149,41 +163,42 @@ def get_missing_basics(state: ProjectState) -> list[str]:
     return missing
 
 
-def is_stage_complete(state: ProjectState, stage: Stage) -> bool:
-    """Check if a stage has all required data."""
-    if stage == "project_basics":
-        return len(get_missing_basics(state)) == 0
+def get_unconfirmed_sections(state: ProjectState) -> list[str]:
+    """Return list of sections that haven't been confirmed yet."""
+    status = state.get("confirmation_status", {})
+    extracted = state.get("extracted_data", {})
     
-    if stage == "visual_collection":
-        has_images = len(state.get("images", [])) > 0
-        no_pending = len(state.get("pending_confirmations", [])) == 0
-        user_ready = state.get("user_confirmed_continue", False)
-        return has_images and no_pending and user_ready
+    unconfirmed = []
     
-    if stage == "material_verification":
-        materials = state.get("materials", [])
-        return len(materials) > 0 and all(m.get("confirmed") for m in materials)
+    # Only include sections that have extracted data
+    if extracted.get("materials") and not status.get("materials"):
+        unconfirmed.append("materials")
+    if extracted.get("measurements") and not status.get("measurements"):
+        unconfirmed.append("measurements")
+    if extracted.get("colors") and not status.get("colors"):
+        unconfirmed.append("colors")
+    if extracted.get("fixtures") and not status.get("fixtures"):
+        unconfirmed.append("fixtures")
+    if extracted.get("appliances") and not status.get("appliances"):
+        unconfirmed.append("appliances")
+    if extracted.get("style") and not status.get("style"):
+        unconfirmed.append("style")
+    if extracted.get("other") and not status.get("other"):
+        unconfirmed.append("other")
     
-    if stage == "measurement_verification":
-        measurements = state.get("measurements", {})
-        return measurements.get("confirmed", False)
-    
-    if stage == "final_review":
-        return state.get("user_confirmed_continue", False)
-    
-    if stage == "cost_estimation":
-        return state.get("estimate") is not None
-    
-    return False
+    return unconfirmed
+
+
+def is_all_confirmed(state: ProjectState) -> bool:
+    """Check if all extracted sections are confirmed."""
+    return len(get_unconfirmed_sections(state)) == 0
 
 
 def get_next_stage(current: Stage) -> Stage:
     """Get the next stage in sequence."""
-    sequence = [
+    sequence: list[Stage] = [
         "project_basics",
-        "visual_collection",
-        "material_verification",
-        "measurement_verification",
+        "image_analysis_generation",
         "final_review",
         "cost_estimation",
         "completed"
