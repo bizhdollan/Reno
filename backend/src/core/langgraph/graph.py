@@ -3,7 +3,7 @@ Main LangGraph definition for renovation estimation.
 
 4-Stage Architecture:
 1. project_basics - Collect title, type, zip_code
-2. image_analysis_generation - Analyze images, confirm, generate preview
+2. image_analysis_generation - Analyze images, confirm, collect vision, generate preview
 3. final_review - Review all data before estimation
 4. cost_estimation - Generate 3-tier estimate, handle selection
 """
@@ -33,7 +33,6 @@ def route_by_stage(state: ProjectState) -> str:
 
 def should_continue(state: ProjectState) -> str:
     """Check if we should continue to next node or end (wait for user)."""
-    # If awaiting_user_input is False, continue processing
     if not state.get("awaiting_user_input", True):
         return "continue"
     return "end"
@@ -66,9 +65,7 @@ def create_graph(checkpointer=None):
         }
     )
     
-    # Each node checks if it should continue or wait
-    # project_basics always waits for user
-    # builder.add_edge("project_basics", END)
+    # project_basics can auto-continue to image_analysis
     builder.add_conditional_edges(
         "project_basics",
         should_continue,
@@ -78,22 +75,43 @@ def create_graph(checkpointer=None):
         }
     )
     
-    # image_analysis_generation can auto-continue (e.g., after confirming all, go to generating)
+    # image_analysis_generation can loop back or continue to final_review
+    def image_analysis_router(state: ProjectState) -> str:
+        if state.get("awaiting_user_input", True):
+            return "end"
+        # Check if we should go to final_review
+        if state.get("current_stage") == "final_review":
+            return "final_review"
+        # Otherwise loop back for sub-state processing
+        return "continue"
+    
     builder.add_conditional_edges(
         "image_analysis_generation",
-        should_continue,
+        image_analysis_router,
         {
-            "continue": "image_analysis_generation",  # Loop back to process next sub-state
+            "continue": "image_analysis_generation",
+            "final_review": "final_review",
             "end": END
         }
     )
     
-    # final_review can auto-continue to cost_estimation
+    # final_review can auto-continue to cost_estimation or go back to image_analysis
+    def final_review_router(state: ProjectState) -> str:
+        if state.get("awaiting_user_input", True):
+            return "end"
+        stage = state.get("current_stage")
+        if stage == "cost_estimation":
+            return "cost_estimation"
+        elif stage == "image_analysis_generation":
+            return "image_analysis_generation"
+        return "end"
+    
     builder.add_conditional_edges(
         "final_review",
-        should_continue,
+        final_review_router,
         {
-            "continue": "cost_estimation",  # Auto-proceed to cost estimation
+            "cost_estimation": "cost_estimation",
+            "image_analysis_generation": "image_analysis_generation",
             "end": END
         }
     )
@@ -141,7 +159,7 @@ async def run_conversation(
     config = {"configurable": {"thread_id": project_id}}
     result = await graph.ainvoke(state, config)
     
-    # Extract assistant response(s) - may have multiple from auto-continue
+    # Extract assistant response(s)
     messages = result.get("messages", [])
     assistant_responses = []
     
@@ -152,7 +170,6 @@ async def run_conversation(
     
     # Return the last (most recent) assistant response
     if assistant_responses:
-        # If there are multiple responses, combine them or return the last meaningful one
         final_response = assistant_responses[-1]
     else:
         final_response = ""

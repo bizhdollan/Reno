@@ -156,6 +156,10 @@ async def get_file(filename: str) -> FileResponse:
     """
     file_path = UPLOAD_DIR / filename
     
+    # If not found in main directory, try the generated subdirectory
+    if not file_path.exists():
+        file_path = UPLOAD_DIR / "generated" / filename
+    
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     

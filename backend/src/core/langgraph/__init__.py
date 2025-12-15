@@ -5,14 +5,11 @@ from src.core.langgraph.state import (
     create_initial_state,
     Stage,
     ImageSubState,
-    ImageData,
+    ImageAnalysis,
     ExtractedData,
-    ConfirmationStatus,
     CostTier,
     CategoryBreakdown,
     get_missing_basics,
-    get_unconfirmed_sections,
-    is_all_confirmed,
     get_next_stage,
 )
 from src.core.langgraph.graph import graph, create_graph, run_conversation
@@ -24,15 +21,12 @@ __all__ = [
     "create_initial_state",
     "Stage",
     "ImageSubState",
-    "ImageData",
+    "ImageAnalysis",
     "ExtractedData",
-    "ConfirmationStatus",
     "CostTier",
     "CategoryBreakdown",
     # State helpers
     "get_missing_basics",
-    "get_unconfirmed_sections",
-    "is_all_confirmed",
     "get_next_stage",
     # Graph
     "graph",

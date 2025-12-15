@@ -3,7 +3,7 @@ LangGraph State Schema for Renovation Estimation.
 
 4-Stage Architecture:
 1. project_basics - Collect title, type, zip_code
-2. image_analysis_generation - Analyze images, confirm info, generate preview
+2. image_analysis_generation - Analyze images, confirm info, collect vision, generate preview
 3. final_review - Review all confirmed data before estimation
 4. cost_estimation - Generate 3-tier cost estimate
 """
@@ -23,46 +23,45 @@ Stage = Literal[
 
 # Sub-states for image_analysis_generation stage
 ImageSubState = Literal[
-    "analyzing",        # Processing uploaded images
-    "confirming",       # Back-and-forth confirmation loop
-    "generating",       # Generating preview image
-    "image_confirmation"  # User reviewing generated image
+    "analyzing",              # Processing uploaded images - extract all data
+    "confirming_extraction",  # User reviews/corrects ALL extracted data at once
+    "collecting_vision",      # OPTIONAL: collect user's renovation vision/ideas
+    "generating",             # Generate proposal/preview image
+    "confirming_proposal"     # User reviews generated image
 ]
 
 
-class ImageData(TypedDict, total=False):
-    """Data for a single uploaded image."""
-    id: str
-    url: str  # base64 data URL or file path
-    analyzed: bool  # Whether image has been analyzed
+class ImageAnalysis(TypedDict, total=False):
+    """Analysis data for a single uploaded image."""
+    url: str
+    index: int
+    analysis: dict  # Contains all extracted categories
 
 
 class ExtractedData(TypedDict, total=False):
-    """All data extracted from images in single pass."""
-    materials: list[dict]  # [{name, type, finish, condition, dimensions, confidence}]
-    measurements: dict  # {room_width, room_length, room_height, area_sqft, ...}
-    colors: list[dict]  # [{element, color, finish}]
-    fixtures: list[dict]  # [{name, type, brand, condition}]
-    appliances: list[dict]  # [{name, type, brand, condition}]
-    style: dict  # {overall_style, condition, age_estimate}
-    other: list[dict]  # Any other relevant details
+    """Merged extraction data from all images (after user confirms)."""
+    materials: list[dict]
+    measurements: dict
+    colors: list[dict]
+    fixtures: list[dict]
+    appliances: list[dict]
+    style: dict
+    # Extensible - add more categories as needed
 
 
-class ConfirmationStatus(TypedDict, total=False):
-    """Track what has been confirmed by user."""
-    materials: bool
-    measurements: bool
-    colors: bool
-    fixtures: bool
-    appliances: bool
-    style: bool
-    other: bool
-    all_confirmed: bool  # True when everything is confirmed
+class RenovationVision(TypedDict, total=False):
+    """User's renovation vision/preferences (optional)."""
+    raw_input: str  # User's original description
+    style_preferences: str
+    material_preferences: str
+    specific_changes: str
+    additional_notes: str
+    ai_summary: str  # AI's interpreted summary
 
 
 class CategoryBreakdown(TypedDict, total=False):
     """Cost breakdown for a single category."""
-    category: str  # "Cabinets", "Countertops", "Flooring", etc.
+    category: str
     description: str
     materials_cost: float
     labor_cost: float
@@ -71,15 +70,15 @@ class CategoryBreakdown(TypedDict, total=False):
 
 class CostTier(TypedDict, total=False):
     """Single tier in 3-tier cost structure."""
-    id: str  # "low", "mid", "high"
-    name: str  # "Low Tier", "Mid Tier", "High Tier"
-    badge: str  # "Budget-Friendly", "Recommended", "Premium"
+    id: str
+    name: str
+    badge: str
     description: str
-    total_cost: float  # COGS + markup
-    cogs: float  # Cost of Goods Sold
-    markup_percentage: float  # 20, 35, 50
+    total_cost: float
+    cogs: float
+    markup_percentage: float
     markup_amount: float
-    included_items: list[str]  # ["Cabinets", "Countertops", ...]
+    included_items: list[str]
     detailed_breakdown: list[CategoryBreakdown]
 
 
@@ -92,7 +91,7 @@ class ProjectState(TypedDict, total=False):
     
     # Stage tracking
     current_stage: Stage
-    image_sub_state: ImageSubState  # Sub-state within image_analysis_generation
+    image_sub_state: ImageSubState
     
     # Project basics (stage 1)
     project_title: str | None
@@ -100,23 +99,29 @@ class ProjectState(TypedDict, total=False):
     zip_code: str | None
     
     # Image analysis (stage 2)
-    images: list[ImageData]  # Uploaded images
-    extracted_data: ExtractedData  # All extracted info from images
-    confirmation_status: ConfirmationStatus  # What's been confirmed
-    current_confirmation_section: str | None  # Which section is being confirmed
+    # Per-image analysis - preserved during extraction/correction phase
+    image_analyses: list[ImageAnalysis]
     
-    # Generated image
-    generate_image: bool  # Flag to enable/disable image generation
-    generated_image_url: str | None  # URL of generated/placeholder image
-    image_generation_feedback: list[str]  # User feedback for regeneration
+    # Merged confirmed data - populated after user confirms extraction
+    extracted_data: ExtractedData
+    
+    # User's renovation vision (optional)
+    renovation_vision: RenovationVision | None
+    
+    # Generated preview image
+    generated_image_url: str | None
+    image_generation_feedback: list[str]
     
     # Cost estimation (stage 4)
-    cost_tiers: list[CostTier] | None  # 3-tier options
-    selected_tier: str | None  # User's selected tier id
+    cost_tiers: list[CostTier] | None
+    selected_tier: str | None
     
     # Control flags
     user_confirmed_continue: bool
     awaiting_user_input: bool
+    
+    # Internal tracking (prefixed with _)
+    _pending_images: list[str]  # Images waiting to be processed
 
 
 def create_initial_state() -> ProjectState:
@@ -128,26 +133,16 @@ def create_initial_state() -> ProjectState:
         project_title=None,
         project_type=None,
         zip_code=None,
-        images=[],
+        image_analyses=[],
         extracted_data={},
-        confirmation_status={
-            "materials": False,
-            "measurements": False,
-            "colors": False,
-            "fixtures": False,
-            "appliances": False,
-            "style": False,
-            "other": False,
-            "all_confirmed": False
-        },
-        current_confirmation_section=None,
-        generate_image=False,  # Disabled by default
+        renovation_vision=None,
         generated_image_url=None,
         image_generation_feedback=[],
         cost_tiers=None,
         selected_tier=None,
         user_confirmed_continue=False,
-        awaiting_user_input=True
+        awaiting_user_input=True,
+        _pending_images=[]
     )
 
 
@@ -163,35 +158,68 @@ def get_missing_basics(state: ProjectState) -> list[str]:
     return missing
 
 
-def get_unconfirmed_sections(state: ProjectState) -> list[str]:
-    """Return list of sections that haven't been confirmed yet."""
-    status = state.get("confirmation_status", {})
-    extracted = state.get("extracted_data", {})
+def merge_image_analyses_to_extracted(image_analyses: list[ImageAnalysis]) -> ExtractedData:
+    """
+    Merge per-image analyses into a single ExtractedData dict.
     
-    unconfirmed = []
+    Strategy:
+    - Lists (materials, colors, fixtures, appliances): combine and deduplicate by name
+    - Dicts (measurements, style): use first available or merge intelligently
+    """
+    merged: ExtractedData = {
+        "materials": [],
+        "measurements": {},
+        "colors": [],
+        "fixtures": [],
+        "appliances": [],
+        "style": {}
+    }
     
-    # Only include sections that have extracted data
-    if extracted.get("materials") and not status.get("materials"):
-        unconfirmed.append("materials")
-    if extracted.get("measurements") and not status.get("measurements"):
-        unconfirmed.append("measurements")
-    if extracted.get("colors") and not status.get("colors"):
-        unconfirmed.append("colors")
-    if extracted.get("fixtures") and not status.get("fixtures"):
-        unconfirmed.append("fixtures")
-    if extracted.get("appliances") and not status.get("appliances"):
-        unconfirmed.append("appliances")
-    if extracted.get("style") and not status.get("style"):
-        unconfirmed.append("style")
-    if extracted.get("other") and not status.get("other"):
-        unconfirmed.append("other")
+    seen_materials = set()
+    seen_colors = set()
+    seen_fixtures = set()
+    seen_appliances = set()
     
-    return unconfirmed
-
-
-def is_all_confirmed(state: ProjectState) -> bool:
-    """Check if all extracted sections are confirmed."""
-    return len(get_unconfirmed_sections(state)) == 0
+    for img_data in image_analyses:
+        analysis = img_data.get("analysis", {})
+        
+        # Merge materials (dedupe by name)
+        for item in analysis.get("materials", []):
+            key = item.get("name", "").lower()
+            if key and key not in seen_materials:
+                seen_materials.add(key)
+                merged["materials"].append(item)
+        
+        # Merge colors (dedupe by element)
+        for item in analysis.get("colors", []):
+            key = item.get("element", "").lower()
+            if key and key not in seen_colors:
+                seen_colors.add(key)
+                merged["colors"].append(item)
+        
+        # Merge fixtures (dedupe by name)
+        for item in analysis.get("fixtures", []):
+            key = item.get("name", "").lower()
+            if key and key not in seen_fixtures:
+                seen_fixtures.add(key)
+                merged["fixtures"].append(item)
+        
+        # Merge appliances (dedupe by name)
+        for item in analysis.get("appliances", []):
+            key = item.get("name", "").lower()
+            if key and key not in seen_appliances:
+                seen_appliances.add(key)
+                merged["appliances"].append(item)
+        
+        # Measurements: use first available with actual values
+        if not merged["measurements"] and analysis.get("measurements"):
+            merged["measurements"] = analysis["measurements"]
+        
+        # Style: use first available
+        if not merged["style"] and analysis.get("style"):
+            merged["style"] = analysis["style"]
+    
+    return merged
 
 
 def get_next_stage(current: Stage) -> Stage:

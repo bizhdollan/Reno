@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, X, Paperclip, Check, ChevronDown, ChevronUp } from "lucide-react";
+import { Send, X, Paperclip, Check, ChevronDown, ChevronUp, Camera, SwitchCamera } from "lucide-react";
 import rehypeRaw from "rehype-raw";
 
 // ==================== TYPES ====================
@@ -152,6 +152,155 @@ const ImagePreview = memo(function ImagePreview({ files, onRemove }: { files: Up
   );
 });
 
+// ==================== CAMERA MODAL ====================
+
+interface CameraModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onCapture: (file: File) => void;
+}
+
+function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("environment");
+  const [error, setError] = useState<string | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+
+  const startCamera = useCallback(async (facing: "user" | "environment") => {
+    try {
+      // Stop existing stream
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      
+      setError(null);
+      const mediaStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: facing,
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        },
+        audio: false
+      });
+      
+      setStream(mediaStream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+      }
+    } catch (err) {
+      console.error("Camera error:", err);
+      setError("Unable to access camera. Please check permissions.");
+    }
+  }, [stream]);
+
+  const stopCamera = useCallback(() => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+    }
+  }, [stream]);
+
+  useEffect(() => {
+    if (isOpen) {
+      startCamera(facingMode);
+    } else {
+      stopCamera();
+    }
+    return () => stopCamera();
+  }, [isOpen]);
+
+  const switchCamera = useCallback(() => {
+    const newFacing = facingMode === "user" ? "environment" : "user";
+    setFacingMode(newFacing);
+    startCamera(newFacing);
+  }, [facingMode, startCamera]);
+
+  const capturePhoto = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current) return;
+    
+    setIsCapturing(true);
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.drawImage(video, 0, 0);
+      
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const file = new File([blob], `camera_${Date.now()}.jpg`, { type: "image/jpeg" });
+          onCapture(file);
+          onClose();
+        }
+        setIsCapturing(false);
+      }, "image/jpeg", 0.9);
+    }
+  }, [onCapture, onClose]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black flex flex-col">
+      {/* Header */}
+      <div className="flex items-center justify-between p-4 bg-black/50">
+        <button onClick={onClose} className="text-white p-2">
+          <X size={24} />
+        </button>
+        <span className="text-white font-medium">Take Photo</span>
+        <button onClick={switchCamera} className="text-white p-2">
+          <SwitchCamera size={24} />
+        </button>
+      </div>
+
+      {/* Camera View */}
+      <div className="flex-1 relative flex items-center justify-center bg-black">
+        {error ? (
+          <div className="text-white text-center p-4">
+            <p className="mb-4">{error}</p>
+            <button
+              onClick={() => startCamera(facingMode)}
+              className="px-4 py-2 bg-blue-600 rounded-lg"
+            >
+              Try Again
+            </button>
+          </div>
+        ) : (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="max-h-full max-w-full object-contain"
+          />
+        )}
+        <canvas ref={canvasRef} className="hidden" />
+      </div>
+
+      {/* Capture Button */}
+      <div className="p-6 bg-black/50 flex justify-center">
+        <button
+          onClick={capturePhoto}
+          disabled={!!error || isCapturing}
+          className="w-16 h-16 rounded-full bg-white border-4 border-gray-300 flex items-center justify-center disabled:opacity-50 active:scale-95 transition-transform"
+        >
+          {isCapturing ? (
+            <div className="w-6 h-6 border-2 border-gray-600 border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <div className="w-12 h-12 rounded-full bg-white border-2 border-gray-400" />
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ==================== TIER COMPONENTS ====================
+
 const TierCard = memo(function TierCard({ tier, isSelected, isExpanded, onSelect, onToggleExpand }: { tier: CostTier; isSelected: boolean; isExpanded: boolean; onSelect: () => void; onToggleExpand: () => void }) {
   const badgeColors: Record<string, string> = { "Budget-Friendly": "bg-green-100 text-green-800", Recommended: "bg-blue-100 text-blue-800", Premium: "bg-purple-100 text-purple-800" };
   return (
@@ -257,6 +406,7 @@ export default function EstimatePage() {
   const [projectState, setProjectState] = useState<ProjectState | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -264,10 +414,9 @@ export default function EstimatePage() {
 
   useEffect(() => { setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100); }, [messages.length, isSending]);
   useEffect(() => { const t = textareaRef.current; if (t) { t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight, 150)}px`; } }, [input]);
-    // Auto-focus textarea after message is sent
+  // Auto-focus textarea after message is sent
   useEffect(() => {
     if (!isSending && messages.length > 0) {
-      // Small delay to ensure DOM has updated and textarea is no longer disabled
       const timer = setTimeout(() => {
         textareaRef.current?.focus();
       }, 50);
@@ -290,22 +439,51 @@ export default function EstimatePage() {
     start();
   }, [projectId]);
 
-  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    e.target.value = "";
-    const newFiles: UploadedFile[] = files.map((file) => ({ file, preview: URL.createObjectURL(file), uploading: true }));
-    setPendingFiles((prev) => [...prev, ...newFiles]);
-    for (const fileEntry of newFiles) {
-      try {
-        const result = await uploadFile(fileEntry.file);
-        setPendingFiles((prev) => prev.map((f) => f.preview === fileEntry.preview ? { ...f, uploading: false, uploaded: { file_id: result.file_id, url: result.url } } : f));
-      } catch (err) {
-        setPendingFiles((prev) => prev.map((f) => f.preview === fileEntry.preview ? { ...f, uploading: false, error: err instanceof Error ? err.message : "Upload failed" } : f));
-      }
+  const addFileToUpload = useCallback(async (file: File) => {
+    const preview = URL.createObjectURL(file);
+    const fileEntry: UploadedFile = { file, preview, uploading: true };
+    
+    setPendingFiles((prev) => [...prev, fileEntry]);
+    
+    try {
+      const result = await uploadFile(file);
+      setPendingFiles((prev) =>
+        prev.map((f) =>
+          f.preview === preview
+            ? { ...f, uploading: false, uploaded: { file_id: result.file_id, url: result.url } }
+            : f
+        )
+      );
+    } catch (err) {
+      setPendingFiles((prev) =>
+        prev.map((f) =>
+          f.preview === preview
+            ? { ...f, uploading: false, error: err instanceof Error ? err.message : "Upload failed" }
+            : f
+        )
+      );
     }
   }, []);
 
-  const removeFile = useCallback((index: number) => { setPendingFiles((prev) => { const file = prev[index]; if (file) URL.revokeObjectURL(file.preview); return prev.filter((_, i) => i !== index); }); }, []);
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    for (const file of files) {
+      await addFileToUpload(file);
+    }
+  }, [addFileToUpload]);
+
+  const handleCameraCapture = useCallback((file: File) => {
+    addFileToUpload(file);
+  }, [addFileToUpload]);
+
+  const removeFile = useCallback((index: number) => {
+    setPendingFiles((prev) => {
+      const file = prev[index];
+      if (file) URL.revokeObjectURL(file.preview);
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
 
   const sendMessage = useCallback(async (overrideMessage?: string) => {
     if (isSending) return;
@@ -376,20 +554,72 @@ export default function EstimatePage() {
         <footer className="flex-shrink-0 border-t border-gray-200 bg-white">
           <div className="max-w-4xl mx-auto px-4 py-4">
             <ImagePreview files={pendingFiles} onRemove={removeFile} />
-            <div className="flex items-end gap-3">
-              <button onClick={() => fileInputRef.current?.click()} disabled={isSending} className="flex-shrink-0 p-3 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-50" title="Attach images"><Paperclip size={22} /></button>
+            <div className="flex items-end gap-2 sm:gap-3">
+              {/* Attach Images Button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isSending}
+                className="flex-shrink-0 p-2.5 sm:p-3 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-50"
+                title="Attach images"
+              >
+                <Paperclip size={20} className="sm:w-[22px] sm:h-[22px]" />
+              </button>
+              
+              {/* Camera Button */}
+              <button
+                onClick={() => setIsCameraOpen(true)}
+                disabled={isSending}
+                className="flex-shrink-0 p-2.5 sm:p-3 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-50"
+                title="Take photo"
+              >
+                <Camera size={20} className="sm:w-[22px] sm:h-[22px]" />
+              </button>
+              
               <input ref={fileInputRef} type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={handleFileSelect} className="hidden" />
+              
+              {/* Text Input */}
               <div className="flex-1">
-                <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Type your message..." disabled={isSending} rows={1} className="w-full resize-none rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50" />
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type your message..."
+                  disabled={isSending}
+                  rows={1}
+                  className="w-full resize-none rounded-xl border border-gray-300 bg-white px-3 sm:px-4 py-2.5 sm:py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
+                />
               </div>
-              <button onClick={() => sendMessage()} disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles)} className="flex-shrink-0 p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm" title="Send message"><Send size={22} /></button>
+              
+              {/* Send Button */}
+              <button
+                onClick={() => sendMessage()}
+                disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles)}
+                className="flex-shrink-0 p-2.5 sm:p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                title="Send message"
+              >
+                <Send size={20} className="sm:w-[22px] sm:h-[22px]" />
+              </button>
             </div>
-            <p className="text-xs text-gray-400 mt-2 text-center">Press Enter to send • Shift+Enter for new line</p>
+            <p className="text-xs text-gray-400 mt-2 text-center hidden sm:block">Press Enter to send • Shift+Enter for new line</p>
           </div>
         </footer>
       )}
 
-      {isCompleted && (<footer className="flex-shrink-0 border-t border-gray-200 bg-green-50 py-4"><div className="max-w-4xl mx-auto px-4 text-center"><p className="text-green-700 font-medium">✅ Your renovation estimate is complete!</p></div></footer>)}
+      {isCompleted && (
+        <footer className="flex-shrink-0 border-t border-gray-200 bg-green-50 py-4">
+          <div className="max-w-4xl mx-auto px-4 text-center">
+            <p className="text-green-700 font-medium">✅ Your renovation estimate is complete!</p>
+          </div>
+        </footer>
+      )}
+
+      {/* Camera Modal */}
+      <CameraModal
+        isOpen={isCameraOpen}
+        onClose={() => setIsCameraOpen(false)}
+        onCapture={handleCameraCapture}
+      />
     </div>
   );
 }

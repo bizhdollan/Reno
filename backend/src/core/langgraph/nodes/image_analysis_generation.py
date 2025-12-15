@@ -1,125 +1,122 @@
 """
 Image Analysis & Generation Node.
 
-Handles the entire image analysis flow:
-1. analyzing - Process uploaded images (parallel VLM calls)
-2. confirming - Section-by-section confirmation with per-image display
-3. generating - Generate preview image (placeholder for now)
-4. image_confirmation - User reviews generated image
+Handles the entire image analysis flow with revised sub-states:
+1. analyzing - Process uploaded images, extract ALL data
+2. confirming_extraction - User reviews/corrects all extracted data at once
+3. collecting_vision - OPTIONAL: collect user's renovation vision
+4. generating - Generate proposal/preview image
+5. confirming_proposal - User reviews generated image
 """
 
 import asyncio
-import uuid
 import base64
-import httpx
 from pathlib import Path
+
+import httpx
 
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.state import (
-    ProjectState, 
-    ImageData, 
-    ExtractedData,
-    get_unconfirmed_sections,
-    is_all_confirmed
+    ProjectState,
+    ImageAnalysis,
+    merge_image_analyses_to_extracted,
 )
 from src.core.langgraph.utils import get_latest_user_message, parse_json
+from src.core.langgraph.config import (
+    EXTRACTION_CATEGORIES,
+    build_extraction_prompt_section,
+    build_extraction_json_schema,
+    VISION_PROMPT,
+)
 
 
 # Configuration
-BACKEND_BASE_URL = "http://localhost:8000"
 IMAGES_DIR = Path("images")
 
-# Sections in order we want to confirm them
-CONFIRMATION_SECTIONS_ORDER = ["materials", "measurements", "colors", "fixtures", "appliances", "style"]
 
+# =============================================================================
+# PROMPTS
+# =============================================================================
 
-# Comprehensive image analysis prompt
-IMAGE_ANALYSIS_PROMPT = """You are a renovation expert analyzing an image for a {project_type} renovation project.
+def build_image_analysis_prompt(project_type: str) -> str:
+    """Build the full image analysis prompt with configured categories."""
+    categories_section = build_extraction_prompt_section()
+    json_schema = build_extraction_json_schema()
+    
+    return f"""You are a renovation expert analyzing an image for a {project_type} renovation project.
 
-Analyze this image comprehensively and extract ALL renovation-relevant information in a single pass.
+Analyze this image comprehensively and extract ALL renovation-relevant information.
 
-Extract the following (include only what you can actually see):
+## What to Extract
 
-1. **Materials**: What materials are visible? (countertops, cabinets, flooring, walls, etc.)
-   - For each: name, type/material, finish, condition (good/fair/poor)
+{categories_section}
 
-2. **Measurements**: Estimate room/space dimensions if possible
-   - Room width, length, height (in feet)
-   - Total area estimate
+## Instructions
 
-3. **Colors**: What colors are present?
-   - For each visible element: element name, color, finish (matte/glossy/etc.)
+- Only include categories where you can actually identify relevant items
+- Be specific and accurate in your descriptions
+- For measurements, provide estimates based on visual cues (doorways, standard fixture sizes, etc.)
+- Note the condition of items where visible (excellent, good, fair, poor)
 
-4. **Fixtures**: What fixtures are visible? (faucets, handles, lighting, etc.)
-   - For each: name, type, style, condition
-
-5. **Appliances**: What appliances are visible? (if applicable)
-   - For each: name, type, brand if visible, condition
-
-6. **Style & Condition**: Overall assessment
-   - Overall style (modern, traditional, transitional, etc.)
-   - Overall condition (excellent/good/fair/poor)
-   - Estimated age of the space
+## Response Format
 
 Return JSON only with this structure:
-{{
-    "materials": [
-        {{"name": "flooring", "type": "hardwood", "finish": "natural", "condition": "good"}}
-    ],
-    "measurements": {{
-        "room_width_ft": 12,
-        "room_length_ft": 10,
-        "room_height_ft": 9,
-        "area_sqft": 120,
-        "notes": "estimated from image"
-    }},
-    "colors": [
-        {{"element": "walls", "color": "white", "finish": "matte"}}
-    ],
-    "fixtures": [
-        {{"name": "light fixture", "type": "pendant", "style": "modern", "condition": "good"}}
-    ],
-    "appliances": [],
-    "style": {{
-        "overall_style": "modern",
-        "condition": "good",
-        "age_estimate": "5-10 years"
-    }}
-}}
+{json_schema}
 
-Only include sections where you can identify relevant items."""
+Only include categories where you found relevant items. Return valid JSON, no markdown."""
 
 
-CORRECTION_PARSE_PROMPT = """The user wants to correct some image analysis data.
+CORRECTION_PROMPT = """You are helping update renovation extraction data based on user feedback.
 
-We have {num_images} images analyzed. The user said: "{user_message}"
+## Current Extracted Data
+{current_data}
 
-Determine:
-1. Is this a confirmation (yes, looks good, correct, ok, etc.)?
-2. Is this a correction/change request?
-3. If correction, which image number (1, 2, 3, etc.) or "unclear"?
-4. What property/field to change and to what value?
+## User's Correction/Addition
+"{user_message}"
+
+## Your Task
+
+Apply the user's correction or addition to the data. The user might:
+- Add new items (e.g., "there's also a mirror on the wall")
+- Correct existing items (e.g., "the flooring is hardwood, not laminate")
+- Remove items (e.g., "remove the rug, it's not part of the renovation")
+- Change details (e.g., "the walls are beige, not white")
+
+Return the COMPLETE updated data as JSON. Include ALL existing items (modified or not) plus any additions.
+Keep the same structure as the current data. Return valid JSON only, no markdown.
+
+{json_schema}"""
+
+
+VISION_CLARIFICATION_PROMPT = """The user has shared their renovation vision:
+
+"{user_vision}"
+
+Project type: {project_type}
+Current space details: {current_details}
+
+Analyze if the user's vision is clear enough or needs clarification. Consider:
+- Is the scope of work clear?
+- Are material preferences specific enough for estimation?
+- Are there any ambiguities that could affect the estimate?
 
 Return JSON:
 {{
-    "is_confirmation": true/false,
-    "is_correction": true/false,
-    "image_number": 1 or 2 or 3 or "unclear" or null,
-    "field_to_change": "materials/colors/fixtures/style/measurements" or null,
-    "item_to_change": "flooring/walls/etc" or null,
-    "new_value": "the new value" or null,
-    "needs_clarification": true/false
-}}
+    "is_clear": true/false,
+    "summary": "Brief summary of understood vision",
+    "followup_questions": ["question1", "question2"] or [] if clear,
+    "parsed_vision": {{
+        "style_preferences": "...",
+        "material_preferences": "...",
+        "specific_changes": "...",
+        "additional_notes": "..."
+    }}
+}}"""
 
-Examples:
-- "yes" -> is_confirmation=true
-- "correct" -> is_confirmation=true
-- "looks good" -> is_confirmation=true
-- "ok" -> is_confirmation=true
-- "image 2 flooring is hardwood" -> is_correction=true, image_number=2, field="materials", item="flooring", new_value="hardwood"
-- "the walls are beige not white" -> is_correction=true, image_number="unclear", needs_clarification=true
-"""
 
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
 
 async def load_image_as_base64(image_url: str) -> str:
     """Load an image and convert to base64 data URL for VLM."""
@@ -163,12 +160,13 @@ async def load_image_as_base64(image_url: str) -> str:
     raise ValueError(f"Unsupported image URL format: {image_url}")
 
 
-async def analyze_single_image(image_url: str, project_type: str, image_index: int) -> dict:
-    """Analyze a single image. Returns dict with url, index, and analysis."""
+async def analyze_single_image(image_url: str, project_type: str, image_index: int) -> ImageAnalysis:
+    """Analyze a single image and return structured analysis."""
     print(f"[image_analysis] Starting analysis for image {image_index + 1}: {image_url}")
     
     provider = LLMProvider.for_vlm()
     image_data_url = await load_image_as_base64(image_url)
+    prompt = build_image_analysis_prompt(project_type)
     
     response = await provider.complete(
         messages=[
@@ -179,120 +177,276 @@ async def analyze_single_image(image_url: str, project_type: str, image_index: i
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": IMAGE_ANALYSIS_PROMPT.format(project_type=project_type)},
+                    {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": image_data_url}}
                 ]
             }
         ],
         temperature=0.2,
-        max_tokens=1500
+        max_tokens=2000
     )
     
     try:
         analysis = parse_json(response)
-    except:
+    except Exception as e:
+        print(f"[image_analysis] Failed to parse response for image {image_index + 1}: {e}")
         analysis = {}
     
-    print(f"[image_analysis] Completed image {image_index + 1}: found {list(analysis.keys())}")
+    categories_found = [k for k in analysis.keys() if analysis.get(k)]
+    print(f"[image_analysis] Completed image {image_index + 1}: found {categories_found}")
     
-    return {
-        "url": image_url,
-        "index": image_index,
-        "analysis": analysis
-    }
+    return ImageAnalysis(
+        url=image_url,
+        index=image_index,
+        analysis=analysis
+    )
 
 
-async def analyze_images_parallel(image_urls: list[str], project_type: str) -> list[dict]:
+async def analyze_images_parallel(image_urls: list[str], project_type: str) -> list[ImageAnalysis]:
     """Analyze multiple images in parallel."""
     tasks = [
-        analyze_single_image(url, project_type, idx) 
+        analyze_single_image(url, project_type, idx)
         for idx, url in enumerate(image_urls)
     ]
     results = await asyncio.gather(*tasks)
     return sorted(results, key=lambda x: x["index"])
 
 
-def format_image_analysis_for_display(image_analyses: list[dict], section: str) -> str:
-    """Format per-image analysis for a specific section with thumbnail images."""
+def format_extracted_data_for_display(extracted_data: dict, image_analyses: list[ImageAnalysis]) -> str:
+    """Format all extracted data for user review."""
     lines = []
     
-    for img_data in image_analyses:
-        img_num = img_data["index"] + 1
-        img_url = img_data["url"]
-        analysis = img_data.get("analysis", {})
-        section_data = analysis.get(section)
-        
-        if not section_data:
-            continue
-        
-        # Image header with small thumbnail (using HTML for size control)
-        lines.append(f"**Image {img_num}**")
-        lines.append(f'<img src="{img_url}" width="150" height="100" style="object-fit: cover; border-radius: 8px;" />')
-        lines.append("")
-        
-        # Format section data
-        if section == "materials":
-            for m in section_data:
-                line = f"- **{m.get('name', 'Unknown')}**: {m.get('type', '?')}"
-                if m.get('finish'):
-                    line += f", {m['finish']} finish"
-                if m.get('condition'):
-                    line += f" ({m['condition']})"
-                lines.append(line)
-        
-        elif section == "measurements":
-            m = section_data
-            lines.append(f"- Room: {m.get('room_width_ft', '?')} × {m.get('room_length_ft', '?')} ft")
-            lines.append(f"- Height: {m.get('room_height_ft', '?')} ft")
-            lines.append(f"- Area: {m.get('area_sqft', '?')} sq ft")
-        
-        elif section == "colors":
-            for c in section_data:
-                lines.append(f"- **{c.get('element', 'Unknown')}**: {c.get('color', '?')} ({c.get('finish', 'unknown')})")
-        
-        elif section == "fixtures":
-            for f in section_data:
-                lines.append(f"- **{f.get('name', 'Unknown')}**: {f.get('type', '?')} ({f.get('condition', '?')})")
-        
-        elif section == "appliances":
-            for a in section_data:
-                lines.append(f"- **{a.get('name', 'Unknown')}**: {a.get('type', '?')}")
-        
-        elif section == "style":
-            s = section_data
-            lines.append(f"- Style: {s.get('overall_style', 'Unknown')}")
-            lines.append(f"- Condition: {s.get('condition', '?')}")
-            lines.append(f"- Age: {s.get('age_estimate', '?')}")
-        
-        lines.append("")
-        lines.append("---")
+    # Show which images were analyzed
+    if image_analyses:
+        lines.append(f"**Analyzed {len(image_analyses)} image(s)**\n")
+        for img in image_analyses:
+            lines.append(f'<img src="{img["url"]}" width="120" height="80" style="object-fit: cover; border-radius: 8px; display: inline-block; margin-right: 8px;" />')
+        lines.append("\n")
+    
+    lines.append("---\n")
+    
+    # Materials
+    materials = extracted_data.get("materials", [])
+    if materials:
+        lines.append("### 🧱 Materials\n")
+        for m in materials:
+            line = f"- **{m.get('name', 'Unknown')}**: {m.get('type', 'N/A')}"
+            if m.get('finish'):
+                line += f", {m['finish']} finish"
+            if m.get('condition'):
+                line += f" ({m['condition']})"
+            lines.append(line)
         lines.append("")
     
-    return "\n".join(lines).strip() if lines else "No data found for this section."
-
-
-async def parse_user_correction(user_message: str, num_images: int) -> dict:
-    """Parse user's correction or confirmation response."""
-    # Quick check for obvious confirmations without LLM
-    lower = user_message.lower().strip()
-    if lower in ["yes", "correct", "ok", "okay", "looks good", "good", "right", "confirm", "y"]:
-        return {"is_confirmation": True, "is_correction": False, "needs_clarification": False}
+    # Measurements
+    measurements = extracted_data.get("measurements", {})
+    if measurements:
+        lines.append("### 📐 Measurements\n")
+        if measurements.get("room_width_ft") and measurements.get("room_length_ft"):
+            lines.append(f"- **Room Size**: {measurements.get('room_width_ft')} × {measurements.get('room_length_ft')} ft")
+        if measurements.get("room_height_ft"):
+            lines.append(f"- **Ceiling Height**: {measurements.get('room_height_ft')} ft")
+        if measurements.get("area_sqft"):
+            lines.append(f"- **Total Area**: {measurements.get('area_sqft')} sq ft")
+        if measurements.get("notes"):
+            lines.append(f"- *Note: {measurements.get('notes')}*")
+        lines.append("")
     
+    # Colors
+    colors = extracted_data.get("colors", [])
+    if colors:
+        lines.append("### 🎨 Colors\n")
+        for c in colors:
+            line = f"- **{c.get('element', 'Unknown')}**: {c.get('color', 'N/A')}"
+            if c.get('finish'):
+                line += f" ({c['finish']})"
+            lines.append(line)
+        lines.append("")
+    
+    # Fixtures
+    fixtures = extracted_data.get("fixtures", [])
+    if fixtures:
+        lines.append("### 💡 Fixtures\n")
+        for f in fixtures:
+            line = f"- **{f.get('name', 'Unknown')}**: {f.get('type', 'N/A')}"
+            if f.get('style'):
+                line += f", {f['style']}"
+            if f.get('condition'):
+                line += f" ({f['condition']})"
+            lines.append(line)
+        lines.append("")
+    
+    # Appliances
+    appliances = extracted_data.get("appliances", [])
+    if appliances:
+        lines.append("### 🔌 Appliances\n")
+        for a in appliances:
+            line = f"- **{a.get('name', 'Unknown')}**: {a.get('type', 'N/A')}"
+            if a.get('brand'):
+                line += f" ({a['brand']})"
+            lines.append(line)
+        lines.append("")
+    
+    # Style
+    style = extracted_data.get("style", {})
+    if style:
+        lines.append("### 🏠 Style Assessment\n")
+        if style.get("overall_style"):
+            lines.append(f"- **Overall Style**: {style['overall_style']}")
+        if style.get("condition"):
+            lines.append(f"- **Current Condition**: {style['condition']}")
+        if style.get("age_estimate"):
+            lines.append(f"- **Estimated Age**: {style['age_estimate']}")
+        lines.append("")
+    
+    return "\n".join(lines)
+
+
+async def apply_user_correction(
+    current_data: dict,
+    user_message: str,
+    project_type: str
+) -> dict:
+    """Use AI to apply user's correction to extracted data."""
     provider = LLMProvider.for_llm()
+    
+    import json
+    current_data_str = json.dumps(current_data, indent=2)
+    json_schema = build_extraction_json_schema()
+    
+    prompt = CORRECTION_PROMPT.format(
+        current_data=current_data_str,
+        user_message=user_message,
+        json_schema=json_schema
+    )
     
     response = await provider.complete(
         messages=[
             {
                 "role": "system",
-                "content": "Analyze user response to image analysis confirmation. Return JSON only."
+                "content": "You are updating renovation data based on user feedback. Return valid JSON only."
             },
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1,
+        max_tokens=2000
+    )
+    
+    try:
+        return parse_json(response)
+    except Exception as e:
+        print(f"[image_analysis] Failed to parse correction: {e}")
+        return current_data
+
+
+USER_INTENT_PROMPT = """Analyze the user's message in a renovation project context.
+
+Current context: {context}
+
+User's message: "{user_message}"
+
+Determine the user's intent. Return JSON only:
+{{
+    "intent": "{intent_options}",
+    "confidence": 0.0 to 1.0,
+    "reasoning": "brief explanation"
+}}"""
+
+
+async def detect_confirmation_intent(user_message: str, context: str) -> dict:
+    """Use AI to detect if user is confirming or wants changes."""
+    provider = LLMProvider.for_llm()
+    
+    prompt = USER_INTENT_PROMPT.format(
+        context=context,
+        user_message=user_message,
+        intent_options="confirm | correction | unclear"
+    )
+    
+    response = await provider.complete(
+        messages=[
             {
-                "role": "user",
-                "content": CORRECTION_PARSE_PROMPT.format(
-                    num_images=num_images,
-                    user_message=user_message
-                )
-            }
+                "role": "system",
+                "content": "You analyze user intent. 'confirm' means they agree/approve. 'correction' means they want to change something. Return JSON only."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.0,
+        max_tokens=150
+    )
+    
+    try:
+        return parse_json(response)
+    except:
+        return {"intent": "unclear", "confidence": 0.0}
+
+
+async def detect_skip_or_vision_intent(user_message: str) -> dict:
+    """Use AI to detect if user wants to skip vision or is providing vision details."""
+    provider = LLMProvider.for_llm()
+    
+    prompt = f"""The user was asked if they have a specific vision for their renovation.
+They could: provide vision details, skip this step, or say they're done.
+
+User's message: "{user_message}"
+
+Determine intent. Return JSON only:
+{{
+    "intent": "skip" | "provide_vision" | "done" | "unclear",
+    "confidence": 0.0 to 1.0,
+    "reasoning": "brief explanation"
+}}
+
+- "skip": User doesn't want to provide vision, wants to proceed without it
+- "provide_vision": User is sharing their renovation ideas/preferences
+- "done": User has finished providing vision, ready to move on
+- "unclear": Cannot determine"""
+    
+    response = await provider.complete(
+        messages=[
+            {
+                "role": "system",
+                "content": "You analyze user intent for renovation vision collection. Return JSON only."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.0,
+        max_tokens=150
+    )
+    
+    try:
+        return parse_json(response)
+    except:
+        return {"intent": "unclear", "confidence": 0.0}
+
+
+async def detect_proceed_intent(user_message: str, context: str) -> dict:
+    """Use AI to detect if user wants to proceed or has feedback."""
+    provider = LLMProvider.for_llm()
+    
+    prompt = f"""Context: {context}
+
+User's message: "{user_message}"
+
+Determine intent. Return JSON only:
+{{
+    "intent": "proceed" | "feedback" | "unclear",
+    "confidence": 0.0 to 1.0,
+    "reasoning": "brief explanation",
+    "feedback_content": "extracted feedback if intent is feedback, else null"
+}}
+
+- "proceed": User wants to continue/move forward
+- "feedback": User is providing feedback or requesting changes
+- "unclear": Cannot determine"""
+    
+    response = await provider.complete(
+        messages=[
+            {
+                "role": "system",
+                "content": "You analyze user intent. Return JSON only."
+            },
+            {"role": "user", "content": prompt}
         ],
         temperature=0.0,
         max_tokens=200
@@ -301,57 +455,44 @@ async def parse_user_correction(user_message: str, num_images: int) -> dict:
     try:
         return parse_json(response)
     except:
-        return {"is_confirmation": False, "is_correction": True, "needs_clarification": True}
+        return {"intent": "unclear", "confidence": 0.0}
 
 
-def apply_correction_to_analysis(image_analyses: list[dict], image_index: int, 
-                                  field: str, item: str, new_value: str) -> list[dict]:
-    """Apply a correction to a specific image's analysis."""
-    if image_index < 0 or image_index >= len(image_analyses):
-        return image_analyses
+async def analyze_vision_input(
+    user_vision: str,
+    project_type: str,
+    current_details: str
+) -> dict:
+    """Analyze user's vision input and determine if clarification needed."""
+    provider = LLMProvider.for_llm()
     
-    analysis = image_analyses[image_index].get("analysis", {})
+    prompt = VISION_CLARIFICATION_PROMPT.format(
+        user_vision=user_vision,
+        project_type=project_type,
+        current_details=current_details
+    )
     
-    if field == "materials":
-        for m in analysis.get("materials", []):
-            if m.get("name", "").lower() == item.lower():
-                m["type"] = new_value
-                break
+    response = await provider.complete(
+        messages=[
+            {
+                "role": "system",
+                "content": "Analyze renovation vision and identify if clarification is needed. Return JSON only."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+        max_tokens=800
+    )
     
-    elif field == "colors":
-        for c in analysis.get("colors", []):
-            if c.get("element", "").lower() == item.lower():
-                c["color"] = new_value
-                break
-    
-    elif field == "style":
-        if item.lower() in ["style", "overall_style"]:
-            analysis.get("style", {})["overall_style"] = new_value
-        elif item.lower() == "condition":
-            analysis.get("style", {})["condition"] = new_value
-    
-    return image_analyses
-
-
-def get_sections_with_data(image_analyses: list[dict]) -> list[str]:
-    """Get list of sections that have data across any image, in defined order."""
-    sections_found = set()
-    for img_data in image_analyses:
-        analysis = img_data.get("analysis", {})
-        for key in CONFIRMATION_SECTIONS_ORDER:
-            if analysis.get(key):
-                sections_found.add(key)
-    
-    # Return in defined order
-    return [s for s in CONFIRMATION_SECTIONS_ORDER if s in sections_found]
-
-
-def get_next_unconfirmed_section(sections_to_confirm: list[str], confirmation_status: dict) -> str | None:
-    """Get the next section that hasn't been confirmed yet."""
-    for section in sections_to_confirm:
-        if not confirmation_status.get(section):
-            return section
-    return None
+    try:
+        return parse_json(response)
+    except:
+        return {
+            "is_clear": True,
+            "summary": user_vision,
+            "followup_questions": [],
+            "parsed_vision": {"additional_notes": user_vision}
+        }
 
 
 def get_placeholder_image_url() -> str:
@@ -359,15 +500,20 @@ def get_placeholder_image_url() -> str:
     return "/api/v1/files/placeholder-renovation.jpg"
 
 
+# =============================================================================
+# MAIN NODE
+# =============================================================================
+
 async def image_analysis_generation_node(state: ProjectState) -> dict:
     """
     Main image analysis and generation node.
     
-    Handles sub-states:
-    - analyzing: Process new images (parallel)
-    - confirming: Section-by-section confirmation with per-image display
-    - generating: Generate preview image
-    - image_confirmation: User reviews generated image
+    Sub-states:
+    - analyzing: Process new images, extract ALL data
+    - confirming_extraction: User reviews/corrects all data at once
+    - collecting_vision: OPTIONAL - collect user's renovation vision
+    - generating: Generate proposal/preview image
+    - confirming_proposal: User reviews generated image
     """
     sub_state = state.get("image_sub_state", "analyzing")
     messages = state.get("messages", [])
@@ -378,55 +524,54 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
     if pending_images:
         new_image_urls = pending_images
     
-    # Get persisted data from state
-    image_analyses = state.get("image_analyses", [])
-    confirmation_status = dict(state.get("confirmation_status", {}))
-    sections_to_confirm = state.get("sections_to_confirm", [])
-    current_section = state.get("current_confirmation_section")
+    # IMPORTANT: Always preserve existing state data
+    image_analyses = list(state.get("image_analyses", []))
+    extracted_data = dict(state.get("extracted_data", {}))
+    renovation_vision = state.get("renovation_vision")
     
-    updates = {}
+    updates = {
+        "image_analyses": image_analyses,
+        "extracted_data": extracted_data,
+    }
     
     # Clear pending images after using
     if pending_images:
         updates["_pending_images"] = []
     
-    print(f"[image_analysis] SUB_STATE: {sub_state} | user_message={user_message!r} | new_images={len(new_image_urls)} | pending={len(pending_images)} | stored_analyses={len(image_analyses)}")
+    project_type = state.get("project_type", "renovation")
     
-    # ===== ANALYZING STATE =====
+    print(f"[image_analysis] SUB_STATE: {sub_state} | user_message={user_message!r} | "
+          f"new_images={len(new_image_urls)} | stored_analyses={len(image_analyses)}")
+    
+    # =========================================================================
+    # ANALYZING STATE - Extract all data from images
+    # =========================================================================
     if sub_state == "analyzing":
-        project_type = state.get("project_type", "renovation")
-        
         if new_image_urls:
             print(f"[image_analysis] Processing {len(new_image_urls)} images in parallel...")
             
-            # Analyze all images in parallel
+            # Analyze all images
             image_analyses = await analyze_images_parallel(new_image_urls, project_type)
-            
-            # Store per-image analyses
             updates["image_analyses"] = image_analyses
             
-            # Get sections with data in order
-            sections_to_confirm = get_sections_with_data(image_analyses)
-            updates["sections_to_confirm"] = sections_to_confirm
-            
-            print(f"[image_analysis] Sections found: {sections_to_confirm}")
+            # Merge into extracted_data
+            extracted_data = merge_image_analyses_to_extracted(image_analyses)
+            updates["extracted_data"] = extracted_data
             
             # Move to confirmation
-            updates["image_sub_state"] = "confirming"
+            updates["image_sub_state"] = "confirming_extraction"
             
-            if sections_to_confirm:
-                first_section = sections_to_confirm[0]
-                updates["current_confirmation_section"] = first_section
-                
-                section_display = format_image_analysis_for_display(image_analyses, first_section)
-                response = (
-                    f"Here's what I found for **{first_section}** in your {len(image_analyses)} images:\n\n"
-                    f"{section_display}\n"
-                    f"Is this correct? Say 'yes' to confirm, or tell me what needs to be changed."
-                )
-            else:
-                response = "I couldn't extract any renovation details from the images. Please upload clearer images."
-        
+            # Format and display all extracted data
+            display = format_extracted_data_for_display(extracted_data, image_analyses)
+            
+            response = (
+                f"# Here's what I found in your images:\n\n"
+                f"{display}\n"
+                f"---\n\n"
+                f"**Is this information correct?**\n\n"
+                f"Let me know if anything needs to be added, removed, or corrected. "
+                f"When everything looks good, say **'confirm'** to continue."
+            )
         else:
             response = "Please upload one or more images of the space you want to renovate."
         
@@ -434,135 +579,243 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
         updates["awaiting_user_input"] = True
         return updates
     
-    # ===== CONFIRMING STATE =====
-    elif sub_state == "confirming":
-        print(f"[image_analysis] CONFIRMING: current_section={current_section} | sections={sections_to_confirm} | confirmed={confirmation_status}")
-        
-        if user_message and current_section:
-            # Parse user's response
-            num_images = len(image_analyses)
-            parsed = await parse_user_correction(user_message, num_images)
-            
-            print(f"[image_analysis] User response parsed: {parsed}")
-            
-            if parsed.get("is_confirmation"):
-                # Mark current section as confirmed
-                confirmation_status[current_section] = True
-                updates["confirmation_status"] = confirmation_status
-                print(f"[image_analysis] Confirmed section: {current_section}")
-                
-            elif parsed.get("is_correction"):
-                if parsed.get("needs_clarification") or parsed.get("image_number") == "unclear":
-                    response = (
-                        f"I have {num_images} images. Which image are you referring to? "
-                        f"Please say something like 'image 1' or 'the first image'."
-                    )
-                    updates["messages"] = [{"role": "assistant", "content": response}]
-                    updates["awaiting_user_input"] = True
-                    return updates
-                
-                else:
-                    # Apply correction
-                    img_num = parsed.get("image_number")
-                    if isinstance(img_num, int) and img_num >= 1:
-                        image_analyses = apply_correction_to_analysis(
-                            image_analyses,
-                            img_num - 1,
-                            parsed.get("field_to_change", ""),
-                            parsed.get("item_to_change", ""),
-                            parsed.get("new_value", "")
-                        )
-                        updates["image_analyses"] = image_analyses
-                    
-                    section_display = format_image_analysis_for_display(image_analyses, current_section)
-                    response = (
-                        f"Updated! Here's the revised **{current_section}**:\n\n"
-                        f"{section_display}\n"
-                        f"Is this correct now?"
-                    )
-                    updates["messages"] = [{"role": "assistant", "content": response}]
-                    updates["awaiting_user_input"] = True
-                    return updates
-        
-        # Find next unconfirmed section
-        next_section = get_next_unconfirmed_section(sections_to_confirm, confirmation_status)
-        
-        print(f"[image_analysis] Next unconfirmed section: {next_section}")
-        
-        if next_section:
-            updates["current_confirmation_section"] = next_section
-            
-            section_display = format_image_analysis_for_display(image_analyses, next_section)
-            response = (
-                f"Now let's review **{next_section}**:\n\n"
-                f"{section_display}\n"
-                f"Is this correct?"
+    # =========================================================================
+    # CONFIRMING EXTRACTION STATE - User reviews/corrects data
+    # =========================================================================
+    elif sub_state == "confirming_extraction":
+        if user_message:
+            # Use AI to detect intent
+            intent_result = await detect_confirmation_intent(
+                user_message,
+                "User is reviewing extracted data from their renovation images. They can confirm if correct or request corrections."
             )
-            updates["messages"] = [{"role": "assistant", "content": response}]
-            updates["awaiting_user_input"] = True
-        else:
-            # All sections confirmed - move to image generation
-            print(f"[image_analysis] All sections confirmed! Moving to generating...")
-            confirmation_status["all_confirmed"] = True
-            updates["confirmation_status"] = confirmation_status
-            updates["image_sub_state"] = "generating"
-            updates["awaiting_user_input"] = False
-            updates["messages"] = []
+            intent = intent_result.get("intent", "unclear")
+            
+            print(f"[image_analysis] Extraction confirmation intent: {intent} | confidence: {intent_result.get('confidence')}")
+            
+            if intent == "confirm":
+                print("[image_analysis] User confirmed extraction. Moving to vision collection.")
+                updates["image_sub_state"] = "collecting_vision"
+                
+                response = VISION_PROMPT
+                updates["messages"] = [{"role": "assistant", "content": response}]
+                updates["awaiting_user_input"] = True
+                return updates
+            
+            elif intent == "correction":
+                # Apply correction using AI
+                print(f"[image_analysis] Applying user correction: {user_message}")
+                corrected_data = await apply_user_correction(
+                    extracted_data,
+                    user_message,
+                    project_type
+                )
+                
+                updates["extracted_data"] = corrected_data
+                
+                # Show updated data
+                display = format_extracted_data_for_display(corrected_data, image_analyses)
+                
+                response = (
+                    f"# Updated Information:\n\n"
+                    f"{display}\n"
+                    f"---\n\n"
+                    f"Anything else to change? Say **'confirm'** when everything looks correct."
+                )
+                
+                updates["messages"] = [{"role": "assistant", "content": response}]
+                updates["awaiting_user_input"] = True
+                return updates
+            
+            else:  # unclear
+                response = (
+                    "I'm not sure what you'd like to do. Could you please:\n"
+                    "- Say **'confirm'** if the information looks correct\n"
+                    "- Or tell me what needs to be changed"
+                )
+                updates["messages"] = [{"role": "assistant", "content": response}]
+                updates["awaiting_user_input"] = True
+                return updates
         
+        # No user message yet - show current data
+        display = format_extracted_data_for_display(extracted_data, image_analyses)
+        response = (
+            f"# Extracted Information:\n\n"
+            f"{display}\n"
+            f"---\n\n"
+            f"Please review and let me know if anything needs to be corrected."
+        )
+        updates["messages"] = [{"role": "assistant", "content": response}]
+        updates["awaiting_user_input"] = True
         return updates
     
-    # ===== GENERATING STATE =====
-    elif sub_state == "generating":
-        generate_image_enabled = state.get("generate_image", False)
+    # =========================================================================
+    # COLLECTING VISION STATE - Optional renovation vision
+    # =========================================================================
+    elif sub_state == "collecting_vision":
+        if user_message:
+            # Use AI to detect intent
+            intent_result = await detect_skip_or_vision_intent(user_message)
+            intent = intent_result.get("intent", "unclear")
+            
+            print(f"[image_analysis] Vision intent: {intent} | confidence: {intent_result.get('confidence')}")
+            
+            if intent == "skip":
+                print("[image_analysis] User skipped vision. Moving to generating.")
+                updates["renovation_vision"] = None
+                updates["image_sub_state"] = "generating"
+                updates["awaiting_user_input"] = False
+                updates["messages"] = []
+                return updates
+            
+            if intent == "done":
+                print("[image_analysis] User done with vision. Moving to generating.")
+                updates["image_sub_state"] = "generating"
+                updates["awaiting_user_input"] = False
+                updates["messages"] = []
+                return updates
+            
+            if intent == "provide_vision":
+                # Analyze the vision input
+                import json
+                current_details = json.dumps(extracted_data, indent=2)[:500]
+                vision_analysis = await analyze_vision_input(
+                    user_message,
+                    project_type,
+                    current_details
+                )
+                
+                # Store vision
+                updates["renovation_vision"] = {
+                    "raw_input": user_message,
+                    "ai_summary": vision_analysis.get("summary", ""),
+                    **vision_analysis.get("parsed_vision", {})
+                }
+                
+                # Check if we need follow-up questions
+                if not vision_analysis.get("is_clear") and vision_analysis.get("followup_questions"):
+                    questions = vision_analysis["followup_questions"]
+                    questions_text = "\n".join([f"- {q}" for q in questions[:3]])
+                    
+                    response = (
+                        f"Thanks for sharing! I understood: **{vision_analysis.get('summary', user_message)}**\n\n"
+                        f"A few quick questions to help with the estimate:\n{questions_text}\n\n"
+                        f"Feel free to answer or say **'done'** to proceed."
+                    )
+                    updates["messages"] = [{"role": "assistant", "content": response}]
+                    updates["awaiting_user_input"] = True
+                    return updates
+                else:
+                    # Vision is clear, move to generating
+                    updates["image_sub_state"] = "generating"
+                    updates["awaiting_user_input"] = False
+                    updates["messages"] = []
+                    return updates
+            
+            else:  # unclear
+                response = (
+                    "I'm not sure what you'd like to do. You can:\n"
+                    "- Share your renovation vision (style, materials, changes you want)\n"
+                    "- Say **'skip'** to proceed without a specific vision\n"
+                    "- Say **'done'** if you've finished sharing"
+                )
+                updates["messages"] = [{"role": "assistant", "content": response}]
+                updates["awaiting_user_input"] = True
+                return updates
         
-        if generate_image_enabled:
-            generated_url = get_placeholder_image_url()
-        else:
-            generated_url = get_placeholder_image_url()
+        # First time in this state - show the vision prompt
+        response = VISION_PROMPT
+        updates["messages"] = [{"role": "assistant", "content": response}]
+        updates["awaiting_user_input"] = True
+        return updates
+    
+    # =========================================================================
+    # GENERATING STATE - Generate proposal image
+    # =========================================================================
+    elif sub_state == "generating":
+        # Simulate image generation with placeholder
+        # TODO: Replace with actual image generation using extracted_data + renovation_vision + images
+        import asyncio
+        print("[image_analysis] Simulating image generation (5 second delay)...")
+        await asyncio.sleep(5)  # Simulate generation time
+        
+        generated_url = get_placeholder_image_url()
         
         updates["generated_image_url"] = generated_url
-        updates["image_sub_state"] = "image_confirmation"
+        updates["image_sub_state"] = "confirming_proposal"
+        
+        # Build context message - only show vision if provided
+        vision = state.get("renovation_vision")
+        if vision and vision.get("ai_summary"):
+            context = f"\n\nBased on your vision: *{vision['ai_summary']}*"
+        else:
+            context = ""
         
         response = (
-            f"Here's a preview of your renovation:\n\n"
+            f"# Renovation Preview{context}\n\n"
             f"![Renovation Preview]({generated_url})\n\n"
-            f"Does this match your vision? Let me know if you'd like any changes, "
-            f"or say 'continue' to proceed to the final review."
+            f"This is a preview of your renovation project. "
+            f"In the full version, this would be an AI-generated visualization based on your images and preferences.\n\n"
+            f"Say **'continue'** to proceed to the final review, or let me know if you have feedback."
         )
         
         updates["messages"] = [{"role": "assistant", "content": response}]
         updates["awaiting_user_input"] = True
         return updates
     
-    # ===== IMAGE CONFIRMATION STATE =====
-    elif sub_state == "image_confirmation":
+    # =========================================================================
+    # CONFIRMING PROPOSAL STATE - User reviews generated image
+    # =========================================================================
+    elif sub_state == "confirming_proposal":
         if user_message:
-            lower = user_message.lower()
+            # Use AI to detect intent
+            intent_result = await detect_proceed_intent(
+                user_message,
+                "User is reviewing a generated renovation preview image. They can proceed to final review or provide feedback."
+            )
+            intent = intent_result.get("intent", "unclear")
             
-            if any(w in lower for w in ["continue", "proceed", "yes", "good", "looks good", "perfect", "ok", "okay"]):
+            print(f"[image_analysis] Proposal confirmation intent: {intent} | confidence: {intent_result.get('confidence')}")
+            
+            if intent == "proceed":
                 updates["current_stage"] = "final_review"
                 updates["awaiting_user_input"] = False
                 updates["messages"] = []
-            else:
+                return updates
+            
+            elif intent == "feedback":
+                # Store feedback
                 feedback = list(state.get("image_generation_feedback", []))
-                feedback.append(user_message)
+                feedback_content = intent_result.get("feedback_content") or user_message
+                feedback.append(feedback_content)
                 updates["image_generation_feedback"] = feedback
                 
                 response = (
-                    f"I've noted your feedback: \"{user_message}\"\n\n"
+                    f"I've noted your feedback: *\"{feedback_content}\"*\n\n"
                     f"In the full version, I would regenerate the image with these changes. "
-                    f"For now, please say 'continue' to proceed to the final review."
+                    f"For now, say **'continue'** to proceed to the final review."
                 )
                 updates["messages"] = [{"role": "assistant", "content": response}]
                 updates["awaiting_user_input"] = True
-        else:
-            response = "Please review the renovation preview and let me know if it looks good."
-            updates["messages"] = [{"role": "assistant", "content": response}]
-            updates["awaiting_user_input"] = True
+                return updates
+            
+            else:  # unclear
+                response = (
+                    "I'm not sure what you'd like to do. You can:\n"
+                    "- Say **'continue'** to proceed to the final review\n"
+                    "- Or share any feedback about the preview"
+                )
+                updates["messages"] = [{"role": "assistant", "content": response}]
+                updates["awaiting_user_input"] = True
+                return updates
         
+        # No message - prompt user
+        response = "Please review the renovation preview and let me know if it looks good, or share any feedback."
+        updates["messages"] = [{"role": "assistant", "content": response}]
+        updates["awaiting_user_input"] = True
         return updates
     
-    # Default fallback
+    # Fallback
     updates["messages"] = [{"role": "assistant", "content": "Something went wrong. Please try again."}]
     updates["awaiting_user_input"] = True
     return updates

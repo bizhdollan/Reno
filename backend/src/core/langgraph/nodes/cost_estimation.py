@@ -2,7 +2,10 @@
 Cost Estimation Node.
 
 Generates 3-tier cost estimates (Low/Mid/High) based on confirmed project data.
-Uses AI to dynamically determine categories and costs based on project type.
+Uses AI to dynamically determine categories and costs based on:
+- Extracted data from images
+- User's renovation vision (if provided)
+- Project basics (type, location)
 """
 
 import json
@@ -19,7 +22,7 @@ COST_ESTIMATION_PROMPT = """You are a renovation cost estimation expert. Generat
 **Location (Zip):** {zip_code}
 **Room Size:** {area_sqft} sq ft
 
-## Confirmed Details
+## Current Space Details
 
 **Materials:**
 {materials}
@@ -28,6 +31,9 @@ COST_ESTIMATION_PROMPT = """You are a renovation cost estimation expert. Generat
 {measurements}
 
 **Style:** {style}
+
+## Renovation Vision
+{renovation_vision}
 
 ## Your Task
 
@@ -50,7 +56,7 @@ Generate THREE cost tiers for this {project_type} renovation:
 
 For EACH tier, provide:
 - Detailed category breakdown (materials cost + labor cost per category)
-- Categories should be relevant to {project_type} (e.g., for kitchen: Cabinets, Countertops, Flooring, Appliances, Plumbing, Electrical, Lighting, Painting)
+- Categories should be relevant to {project_type} and the renovation vision
 - COGS (sum of all materials + labor)
 - Markup amount
 - Total cost
@@ -65,18 +71,18 @@ Return JSON only with this structure:
             "description": "Quality work at the best value",
             "detailed_breakdown": [
                 {{
-                    "category": "Cabinets",
-                    "description": "Stock cabinets, laminate finish",
-                    "materials_cost": 3000,
-                    "labor_cost": 1500,
-                    "total": 4500
+                    "category": "Flooring",
+                    "description": "Laminate flooring installation",
+                    "materials_cost": 1500,
+                    "labor_cost": 800,
+                    "total": 2300
                 }}
             ],
-            "included_items": ["Cabinets", "Countertops", "Flooring", ...],
-            "cogs": 20000,
+            "included_items": ["Flooring", "Painting", "Fixtures", ...],
+            "cogs": 8000,
             "markup_percentage": 20,
-            "markup_amount": 4000,
-            "total_cost": 24000
+            "markup_amount": 1600,
+            "total_cost": 9600
         }},
         {{
             "id": "mid",
@@ -96,6 +102,7 @@ Return JSON only with this structure:
 }}
 
 Be realistic with pricing based on the location (zip code) and current market rates.
+Consider the renovation vision when determining what work is included.
 Ensure Low < Mid < High tier pricing."""
 
 
@@ -107,6 +114,8 @@ def format_materials_for_prompt(materials: list) -> str:
     lines = []
     for m in materials:
         line = f"- {m.get('name', 'Unknown')}: {m.get('type', 'N/A')}"
+        if m.get("finish"):
+            line += f", {m['finish']} finish"
         if m.get("condition"):
             line += f" (current condition: {m['condition']})"
         lines.append(line)
@@ -118,11 +127,37 @@ def format_measurements_for_prompt(measurements: dict) -> str:
     if not measurements:
         return "No measurements available"
     
-    return (
-        f"- Room: {measurements.get('room_width_ft', '?')} x {measurements.get('room_length_ft', '?')} ft\n"
-        f"- Height: {measurements.get('room_height_ft', '?')} ft\n"
-        f"- Area: {measurements.get('area_sqft', '?')} sq ft"
-    )
+    lines = []
+    if measurements.get("room_width_ft") and measurements.get("room_length_ft"):
+        lines.append(f"- Room: {measurements.get('room_width_ft')} x {measurements.get('room_length_ft')} ft")
+    if measurements.get("room_height_ft"):
+        lines.append(f"- Height: {measurements.get('room_height_ft')} ft")
+    if measurements.get("area_sqft"):
+        lines.append(f"- Area: {measurements.get('area_sqft')} sq ft")
+    
+    return "\n".join(lines) if lines else "No measurements available"
+
+
+def format_vision_for_prompt(vision: dict | None) -> str:
+    """Format renovation vision for the prompt."""
+    if not vision:
+        return "No specific vision provided - generate a general estimate based on current space condition."
+    
+    lines = []
+    if vision.get("ai_summary"):
+        lines.append(f"Summary: {vision['ai_summary']}")
+    if vision.get("style_preferences"):
+        lines.append(f"Style: {vision['style_preferences']}")
+    if vision.get("material_preferences"):
+        lines.append(f"Materials: {vision['material_preferences']}")
+    if vision.get("specific_changes"):
+        lines.append(f"Specific changes: {vision['specific_changes']}")
+    if vision.get("additional_notes"):
+        lines.append(f"Notes: {vision['additional_notes']}")
+    if vision.get("raw_input") and not lines:
+        lines.append(vision["raw_input"])
+    
+    return "\n".join(lines) if lines else "No specific vision provided."
 
 
 async def generate_cost_tiers(state: ProjectState) -> list[CostTier]:
@@ -131,6 +166,7 @@ async def generate_cost_tiers(state: ProjectState) -> list[CostTier]:
     
     extracted = state.get("extracted_data", {})
     measurements = extracted.get("measurements", {})
+    vision = state.get("renovation_vision")
     
     prompt = COST_ESTIMATION_PROMPT.format(
         project_type=state.get("project_type", "renovation"),
@@ -138,7 +174,8 @@ async def generate_cost_tiers(state: ProjectState) -> list[CostTier]:
         area_sqft=measurements.get("area_sqft", 100),
         materials=format_materials_for_prompt(extracted.get("materials", [])),
         measurements=format_measurements_for_prompt(measurements),
-        style=extracted.get("style", {}).get("overall_style", "unknown")
+        style=extracted.get("style", {}).get("overall_style", "unknown"),
+        renovation_vision=format_vision_for_prompt(vision)
     )
     
     response = await provider.complete(
@@ -150,14 +187,14 @@ async def generate_cost_tiers(state: ProjectState) -> list[CostTier]:
             {"role": "user", "content": prompt}
         ],
         temperature=0.3,
-        max_tokens=2500
+        max_tokens=3000
     )
     
     try:
         data = parse_json(response)
         return data.get("tiers", [])
-    except:
-        # Fallback tiers if AI fails
+    except Exception as e:
+        print(f"[cost_estimation] Failed to parse AI response: {e}")
         return generate_fallback_tiers(state)
 
 
@@ -217,7 +254,7 @@ async def cost_estimation_node(state: ProjectState) -> dict:
     """
     Cost estimation node.
     
-    - Generates 3-tier cost estimates
+    - Generates 3-tier cost estimates based on extracted data and vision
     - Returns special tier_cards message for frontend
     - Handles tier selection
     - Marks project as completed when tier is selected
@@ -248,6 +285,12 @@ async def cost_estimation_node(state: ProjectState) -> dict:
                 updates["selected_tier"] = selected
                 updates["current_stage"] = "completed"
                 
+                # Include vision summary if available
+                vision = state.get("renovation_vision")
+                vision_note = ""
+                if vision and vision.get("ai_summary"):
+                    vision_note = f"\n\n**Your Vision:** *{vision['ai_summary']}*"
+                
                 response_content = [
                     {
                         "type": "text",
@@ -257,7 +300,8 @@ async def cost_estimation_node(state: ProjectState) -> dict:
                             f"### Your Renovation Estimate\n\n"
                             f"- **Total Cost:** ${selected_tier['total_cost']:,.0f}\n"
                             f"- **COGS:** ${selected_tier['cogs']:,.0f}\n"
-                            f"- **Markup ({selected_tier['markup_percentage']}%):** ${selected_tier['markup_amount']:,.0f}\n\n"
+                            f"- **Markup ({selected_tier['markup_percentage']}%):** ${selected_tier['markup_amount']:,.0f}"
+                            f"{vision_note}\n\n"
                             f"---\n\n"
                             f"Thank you for using our renovation estimator! "
                             f"Your project details have been saved. "
@@ -278,14 +322,23 @@ async def cost_estimation_node(state: ProjectState) -> dict:
     
     # Generate tiers if not already done
     if not cost_tiers:
+        print("[cost_estimation] Generating cost tiers...")
         cost_tiers = await generate_cost_tiers(state)
         updates["cost_tiers"] = cost_tiers
     
     # Build response with tier cards
-    intro_text = (
-        "# Your Renovation Estimate\n\n"
-        "Based on your project details, here are three options for your renovation:\n"
-    )
+    vision = state.get("renovation_vision")
+    if vision and vision.get("ai_summary"):
+        intro_text = (
+            f"# Your Renovation Estimate\n\n"
+            f"Based on your space analysis and vision (*{vision['ai_summary']}*), "
+            f"here are three options for your renovation:\n"
+        )
+    else:
+        intro_text = (
+            "# Your Renovation Estimate\n\n"
+            "Based on your project details, here are three options for your renovation:\n"
+        )
     
     response_content = [
         {"type": "text", "text": intro_text},

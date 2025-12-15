@@ -325,3 +325,5 @@ screenshots/
 *.crt
 *.cert
 
+generate_project_md.py
+project.md
