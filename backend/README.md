@@ -92,3 +92,35 @@ uvicorn main:app --reload
 ```
 
 Open [http://localhost:8000/docs](http://localhost:8000/docs) for API documentation.
+
+## Chat API (synchronous)
+
+- **POST** `/api/v1/chat`
+- Body:
+  ```json
+  {
+    "project_id": "abc123",
+    "message": "I want a kitchen remodel in 94102",
+    "state": {} // optional: send prior ProjectState; if omitted, server uses cached or fresh state
+  }
+  ```
+  For images (multimodal), send `message` as a LangChain-style list:
+  ```json
+  {
+    "project_id": "abc123",
+    "message": [
+      {"type": "text", "text": "Here's my kitchen"},
+      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+    ]
+  }
+  ```
+- Response:
+  ```json
+  {
+    "assistant": "Got it! Please share photos...",
+    "state": { "current_stage": "visual_collection", "messages": [ ... ] }
+  }
+  ```
+- Behavior:
+  - Synchronous request/response (no websockets or polling).
+  - State is cached in-memory per `project_id`; frontend may also send the prior `state` explicitly.

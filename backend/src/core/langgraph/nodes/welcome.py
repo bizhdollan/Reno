@@ -1,2 +1,0 @@
-# Welcome node - Initial greeting
-

@@ -6,4 +6,6 @@ dependencies = [
     "fastapi>=0.124.0",
     "uvicorn>=0.38.0",
     "litellm>=1.80.9",
+    "langgraph>=1.0.4",
+    "python-multipart>=0.0.20",
 ]
