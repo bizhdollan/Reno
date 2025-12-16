@@ -106,9 +106,9 @@ const ProgressBar = memo(function ProgressBar({ currentStage }: { currentStage: 
   return (
     <div className="w-full">
       <div className="flex items-center justify-between relative">
-        <div className="absolute left-0 right-0 top-5 h-0.5 bg-navy-200 dark:bg-navy-700 -z-10" />
+        <div className="absolute left-0 right-0 top-4 sm:top-5 h-0.5 bg-navy-200 dark:bg-navy-700 -z-10" />
         <motion.div 
-          className="absolute left-0 top-5 h-0.5 bg-gradient-to-r from-amber-500 to-amber-400 -z-10"
+          className="absolute left-0 top-4 sm:top-5 h-0.5 bg-gradient-to-r from-amber-500 to-amber-400 -z-10"
           initial={{ width: 0 }}
           animate={{ width: `${(currentIndex / (STAGES.length - 1)) * 100}%` }}
           transition={{ duration: 0.5, ease: "easeOut" }}
@@ -126,41 +126,31 @@ const ProgressBar = memo(function ProgressBar({ currentStage }: { currentStage: 
                   scale: isCurrent ? 1.1 : 1,
                   backgroundColor: isCompleted || isCurrent ? "rgb(245, 158, 11)" : "rgb(226, 232, 240)"
                 }}
-                className={`w-10 h-10 rounded-full flex items-center justify-center text-lg shadow-sm ${
+                className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-sm shadow-sm ${
                   isCompleted || isCurrent ? "text-white" : "text-navy-400"
                 }`}
               >
                 {isCompleted ? (
-                  <CheckCircle2 className="w-5 h-5" />
+                  <CheckCircle2 className="w-4 h-4 sm:w-5 sm:h-5" />
                 ) : isCurrent ? (
                   <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: "linear" }}>
-                    <Sparkles className="w-5 h-5" />
+                    <Sparkles className="w-4 h-4 sm:w-5 sm:h-5" />
                   </motion.div>
                 ) : (
-                  <Circle className="w-5 h-5" />
+                  <Circle className="w-4 h-4 sm:w-5 sm:h-5" />
                 )}
               </motion.div>
               
-              <div className="hidden sm:block mt-2 text-center">
-                <p className={`text-xs font-medium ${isCurrent ? "text-amber-600 dark:text-amber-400" : "text-navy-500 dark:text-navy-400"}`}>
-                  {stage.label}
-                </p>
-              </div>
+              {/* Label - smaller on mobile */}
+              <p className={`text-[10px] sm:text-xs font-medium mt-1 sm:mt-2 text-center ${
+                isCurrent ? "text-amber-600 dark:text-amber-400" : "text-navy-500 dark:text-navy-400"
+              }`}>
+                {stage.label}
+              </p>
             </div>
           );
         })}
       </div>
-      
-      <motion.div 
-        key={currentStage}
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="mt-6 text-center sm:hidden"
-      >
-        <span className="text-2xl mb-1 block">{STAGES[currentIndex]?.icon}</span>
-        <p className="text-sm font-medium text-navy-900 dark:text-white">{STAGES[currentIndex]?.label}</p>
-        <p className="text-xs text-navy-500 dark:text-navy-400">{STAGES[currentIndex]?.description}</p>
-      </motion.div>
     </div>
   );
 });
@@ -190,11 +180,17 @@ function TypingIndicator() {
 }
 
 // ==================== IMAGE PREVIEW ====================
+// Image Preview - FIXED HEIGHT VERSION
 const ImagePreview = memo(function ImagePreview({ files, onRemove }: { files: UploadedFile[]; onRemove: (i: number) => void }) {
   if (files.length === 0) return null;
   
   return (
-    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex gap-2 p-3 bg-navy-50 dark:bg-navy-800/50 rounded-xl mb-2 overflow-x-auto">
+    <motion.div 
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: 'auto' }}
+      exit={{ opacity: 0, height: 0 }}
+      className="flex gap-2 p-2 bg-navy-50 dark:bg-navy-800/50 rounded-xl mb-2 overflow-x-auto max-h-24"
+    >
       {files.map((file, idx) => (
         <motion.div 
           key={idx} 
@@ -206,23 +202,23 @@ const ImagePreview = memo(function ImagePreview({ files, onRemove }: { files: Up
           <img 
             src={file.preview} 
             alt={`Preview ${idx + 1}`}
-            className={`h-20 w-20 object-cover rounded-lg border-2 transition-all ${
+            className={`h-16 w-16 object-cover rounded-lg border-2 transition-all ${
               file.uploading ? "border-amber-400 opacity-70" : file.error ? "border-red-400" : file.uploaded ? "border-emerald-400" : "border-navy-200 dark:border-navy-600"
             }`} 
           />
           {file.uploading && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/30 rounded-lg">
-              <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} className="w-6 h-6 border-2 border-white border-t-transparent rounded-full" />
+              <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} className="w-5 h-5 border-2 border-white border-t-transparent rounded-full" />
             </div>
           )}
           {file.uploaded && (
-            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="absolute bottom-1 right-1 bg-emerald-500 text-white rounded-full p-0.5">
-              <Check size={10} />
+            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="absolute bottom-0.5 right-0.5 bg-emerald-500 text-white rounded-full p-0.5">
+              <Check size={8} />
             </motion.div>
           )}
-          {file.error && <div className="absolute bottom-1 right-1 bg-red-500 text-white text-xs px-1 rounded">!</div>}
-          <button onClick={() => onRemove(idx)} className="absolute -top-2 -right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all shadow-md">
-            <X size={12} />
+          {file.error && <div className="absolute bottom-0.5 right-0.5 bg-red-500 text-white text-[8px] px-1 rounded">!</div>}
+          <button onClick={() => onRemove(idx)} className="absolute -top-1.5 -right-1.5 bg-red-500 hover:bg-red-600 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-all shadow-md">
+            <X size={10} />
           </button>
         </motion.div>
       ))}
@@ -632,14 +628,18 @@ export default function EstimatePage() {
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-navy-50 to-white dark:from-navy-950 dark:to-navy-900">
       {/* Header */}
       <header className="flex-shrink-0 border-b border-navy-100 dark:border-navy-800 bg-white/80 dark:bg-navy-900/80 backdrop-blur-lg sticky top-16 md:top-20 z-30">
-        <div className="max-w-4xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h1 className="text-xl font-bold text-navy-900 dark:text-white">Renovation Estimator</h1>
-              {projectState?.project_title && <p className="text-sm text-navy-500 dark:text-navy-400">{projectState.project_title}</p>}
+        <div className="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-3">
+          <div className="flex items-center justify-between mb-2 sm:mb-3">
+            <div className="min-w-0 flex-1">
+              <h1 className="text-base sm:text-xl font-bold text-navy-900 dark:text-white truncate">Renovation Estimator</h1>
+              {projectState?.project_title && (
+                <p className="text-xs sm:text-sm text-navy-500 dark:text-navy-400 truncate">{projectState.project_title}</p>
+              )}
             </div>
             {projectState?.project_type && (
-              <span className="text-xs font-medium text-navy-600 dark:text-navy-300 bg-navy-100 dark:bg-navy-800 px-3 py-1 rounded-full capitalize">{projectState.project_type}</span>
+              <span className="text-[10px] sm:text-xs font-medium text-navy-600 dark:text-navy-300 bg-navy-100 dark:bg-navy-800 px-2 py-0.5 sm:px-3 sm:py-1 rounded-full capitalize ml-2 flex-shrink-0">
+                {projectState.project_type}
+              </span>
             )}
           </div>
           <ProgressBar currentStage={projectState?.current_stage || "project_basics"} />
@@ -648,8 +648,10 @@ export default function EstimatePage() {
 
       {/* Messages */}
       <main className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto px-4 py-6">
-          <div className="space-y-6">
+        <div className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
+          <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
+
+
             <AnimatePresence>
               {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onImageClick={setLightboxImage} />)}
             </AnimatePresence>
@@ -670,25 +672,27 @@ export default function EstimatePage() {
 
       {/* Input */}
       {!isCompleted && (
-        <footer className="flex-shrink-0 border-t border-navy-100 dark:border-navy-800 bg-white dark:bg-navy-900">
-          <div className="max-w-4xl mx-auto px-4 py-4">
-            <ImagePreview files={pendingFiles} onRemove={removeFile} />
-            <div className="flex items-end gap-2">
-              <motion.button onClick={() => fileInputRef.current?.click()} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Attach images">
-                <Paperclip size={20} />
+        <footer className="flex-shrink-0 border-t border-navy-100 dark:border-navy-800 bg-white dark:bg-navy-900 sticky bottom-0">
+          <div className="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-3">
+            <AnimatePresence>
+              {pendingFiles.length > 0 && <ImagePreview files={pendingFiles} onRemove={removeFile} />}
+            </AnimatePresence>
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              <motion.button onClick={() => fileInputRef.current?.click()} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Attach images">
+                <Paperclip size={18} className="sm:w-5 sm:h-5" />
               </motion.button>
-              <motion.button onClick={() => setIsCameraOpen(true)} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Take photo">
-                <Camera size={20} />
+              <motion.button onClick={() => setIsCameraOpen(true)} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Take photo">
+                <Camera size={18} className="sm:w-5 sm:h-5" />
               </motion.button>
               <input ref={fileInputRef} type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={handleFileSelect} className="hidden" />
               <div className="flex-1">
-                <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Type your message..." disabled={isSending} rows={1} className="w-full resize-none rounded-xl border border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-800 px-4 py-3 text-sm text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent disabled:opacity-50 disabled:bg-navy-50 dark:disabled:bg-navy-900" />
+                <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Type your message..." disabled={isSending} rows={1} className="w-full resize-none rounded-xl border border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-800 px-3 py-2 sm:px-4 sm:py-3 text-sm text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent disabled:opacity-50 disabled:bg-navy-50 dark:disabled:bg-navy-900" />
               </div>
-              <motion.button onClick={() => sendMessage()} disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles)} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-3 bg-gradient-to-r from-amber-500 to-amber-400 text-white rounded-xl shadow-lg shadow-amber-500/25 hover:shadow-xl hover:shadow-amber-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed" title="Send message">
-                <Send size={20} />
+              <motion.button onClick={() => sendMessage()} disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles)} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 bg-gradient-to-r from-amber-500 to-amber-400 text-white rounded-xl shadow-lg shadow-amber-500/25 hover:shadow-xl hover:shadow-amber-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed" title="Send message">
+                <Send size={18} className="sm:w-5 sm:h-5" />
               </motion.button>
             </div>
-            <p className="text-xs text-navy-400 dark:text-navy-500 mt-2 text-center hidden sm:block">Press Enter to send • Shift+Enter for new line</p>
+            <p className="text-[10px] sm:text-xs text-navy-400 dark:text-navy-500 mt-1.5 text-center hidden sm:block">Press Enter to send • Shift+Enter for new line</p>
           </div>
         </footer>
       )}

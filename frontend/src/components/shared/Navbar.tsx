@@ -25,6 +25,12 @@ export default function Navbar() {
   const { theme, toggleTheme } = useTheme();
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  
+  // Check if we're on the landing page
+  const isLandingPage = location.pathname === '/';
+  
+  // Use light/white text only on landing page when NOT scrolled (dark hero background)
+  const useLightText = isLandingPage && !isScrolled;
 
   useEffect(() => {
     const handleScroll = () => {
@@ -55,7 +61,7 @@ export default function Navbar() {
     <>
       <nav
         className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
-          isScrolled
+          isScrolled || !isLandingPage
             ? 'bg-white/80 dark:bg-navy-950/80 backdrop-blur-lg shadow-sm'
             : 'bg-transparent'
         }`}
@@ -71,7 +77,11 @@ export default function Navbar() {
               >
                 <Home className="w-5 h-5 md:w-6 md:h-6 text-white" />
               </motion.div>
-              <span className="text-lg md:text-xl font-bold text-navy-900 dark:text-white">
+              <span className={`text-lg md:text-xl font-bold transition-colors ${
+                useLightText 
+                  ? 'text-white' 
+                  : 'text-navy-900 dark:text-white'
+              }`}>
                 Renovation<span className="text-amber-500">Tech</span>
               </span>
             </Link>
@@ -88,8 +98,10 @@ export default function Navbar() {
                     to={item.path}
                     className={`relative px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 flex items-center gap-2 ${
                       isActive
-                        ? 'text-amber-600 dark:text-amber-400'
-                        : 'text-navy-600 dark:text-navy-200 hover:text-navy-900 dark:hover:text-white hover:bg-navy-100/50 dark:hover:bg-navy-800/50'
+                        ? 'text-amber-500'
+                        : useLightText 
+                          ? 'text-white/80 hover:text-white hover:bg-white/10'
+                          : 'text-navy-700 dark:text-navy-200 hover:text-navy-900 dark:hover:text-white hover:bg-navy-100/50 dark:hover:bg-navy-800/50'
                     }`}
                   >
                     <Icon className="w-4 h-4" />
@@ -111,7 +123,11 @@ export default function Navbar() {
               {/* Theme Toggle */}
               <motion.button
                 onClick={toggleTheme}
-                className="relative w-10 h-10 rounded-xl bg-navy-100 dark:bg-navy-800 flex items-center justify-center overflow-hidden"
+                className={`relative w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden transition-colors ${
+                  useLightText
+                    ? 'bg-white/10 hover:bg-white/20'
+                    : 'bg-navy-100 dark:bg-navy-800'
+                }`}
                 whileTap={{ scale: 0.95 }}
                 aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
               >
@@ -124,7 +140,7 @@ export default function Navbar() {
                       exit={{ y: 20, opacity: 0, rotate: 90 }}
                       transition={{ duration: 0.2 }}
                     >
-                      <Sun className="w-5 h-5 text-amber-500" />
+                      <Sun className={`w-5 h-5 ${useLightText ? 'text-white' : 'text-amber-500'}`} />
                     </motion.div>
                   ) : (
                     <motion.div
@@ -143,11 +159,15 @@ export default function Navbar() {
               {/* Mobile Menu Button */}
               <motion.button
                 onClick={() => setIsMobileMenuOpen(true)}
-                className="md:hidden w-10 h-10 rounded-xl bg-navy-100 dark:bg-navy-800 flex items-center justify-center"
+                className={`md:hidden w-10 h-10 rounded-xl flex items-center justify-center transition-colors ${
+                  useLightText
+                    ? 'bg-white/10 hover:bg-white/20'
+                    : 'bg-navy-100 dark:bg-navy-800'
+                }`}
                 whileTap={{ scale: 0.95 }}
                 aria-label="Open menu"
               >
-                <Menu className="w-5 h-5 text-navy-700 dark:text-navy-200" />
+                <Menu className={`w-5 h-5 ${useLightText ? 'text-white' : 'text-navy-700 dark:text-navy-200'}`} />
               </motion.button>
             </div>
           </div>
@@ -216,30 +236,6 @@ export default function Navbar() {
                     </motion.div>
                   );
                 })}
-              </div>
-
-              {/* Drawer Footer */}
-              <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-navy-100 dark:border-navy-800">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-navy-500 dark:text-navy-400">Theme</span>
-                  <motion.button
-                    onClick={toggleTheme}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg bg-navy-100 dark:bg-navy-800"
-                    whileTap={{ scale: 0.95 }}
-                  >
-                    {theme === 'light' ? (
-                      <>
-                        <Sun className="w-4 h-4 text-amber-500" />
-                        <span className="text-sm text-navy-700 dark:text-navy-200">Light</span>
-                      </>
-                    ) : (
-                      <>
-                        <Moon className="w-4 h-4 text-navy-200" />
-                        <span className="text-sm text-navy-200">Dark</span>
-                      </>
-                    )}
-                  </motion.button>
-                </div>
               </div>
             </motion.div>
           </>

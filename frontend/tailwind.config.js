@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  darkMode: 'class', // Ready for dark mode implementation later
+  darkMode: 'class',
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -49,7 +49,6 @@ export default {
           DEFAULT: 'hsl(var(--popover))',
           foreground: 'hsl(var(--popover-foreground))',
         },
-        // Extended navy palette
         navy: {
           50: '#F0F4F8',
           100: '#D9E2EC',
@@ -60,23 +59,21 @@ export default {
           600: '#486581',
           700: '#334E68',
           800: '#243B53',
-          900: '#1E3A5F',  // Primary
+          900: '#1E3A5F',
           950: '#102A43',
         },
-        // Extended amber palette
         amber: {
           50: '#FFFBEB',
           100: '#FEF3C7',
           200: '#FDE68A',
           300: '#FCD34D',
           400: '#FBBF24',
-          500: '#F59E0B',  // Accent
+          500: '#F59E0B',
           600: '#D97706',
           700: '#B45309',
           800: '#92400E',
           900: '#78350F',
         },
-        // Tier colors
         tier: {
           low: 'hsl(var(--tier-low))',
           mid: 'hsl(var(--tier-mid))',
@@ -92,26 +89,21 @@ export default {
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
       },
-      fontSize: {
-        xs: ['0.75rem', { lineHeight: '1rem' }],      // 12px
-        sm: ['0.875rem', { lineHeight: '1.25rem' }],   // 14px
-        base: ['1rem', { lineHeight: '1.5rem' }],      // 16px
-        lg: ['1.125rem', { lineHeight: '1.75rem' }],   // 18px
-        xl: ['1.25rem', { lineHeight: '1.75rem' }],    // 20px
-        '2xl': ['1.5rem', { lineHeight: '2rem' }],     // 24px
-        '3xl': ['1.875rem', { lineHeight: '2.25rem' }], // 30px
-        '4xl': ['2.25rem', { lineHeight: '2.5rem' }],  // 36px
-        '5xl': ['3rem', { lineHeight: '1' }],          // 48px
-      },
       animation: {
         'in': 'in 0.3s ease-out',
         'in-fast': 'in 0.15s ease-out',
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'float': 'float 3s ease-in-out infinite',
+        'bounce-slow': 'bounce 2s infinite',
       },
       keyframes: {
         in: {
           '0%': { opacity: '0', transform: 'translateY(10px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        float: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-10px)' },
         },
       },
     },
