@@ -26,7 +26,7 @@ app = FastAPI(
 # CORS - allow all for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://cisted-repletely-isabela.ngrok-free.dev","*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

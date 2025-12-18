@@ -21,9 +21,12 @@ router = APIRouter(prefix="/api/v1", tags=["files"])
 
 # Configuration - can be moved to env/config later
 UPLOAD_DIR = Path("images")  # Root level /images folder
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov"}
+ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+# Size limits
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_VIDEO_SIZE = 25 * 1024 * 1024  # 25MB
 
 # Ensure upload directory exists
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -36,6 +39,7 @@ class FileUploadResponse(BaseModel):
     url: str
     size: int
     content_type: str
+    file_type: str  # NEW: 'image' or 'video'
 
 
 class MultiFileUploadResponse(BaseModel):
@@ -47,6 +51,21 @@ def get_file_extension(filename: str) -> str:
     """Get lowercase file extension."""
     return Path(filename).suffix.lower()
 
+def get_file_type(extension: str) -> str:
+    """Determine if file is image or video."""
+    if extension in IMAGE_EXTENSIONS:
+        return "image"
+    elif extension in VIDEO_EXTENSIONS:
+        return "video"
+    return "unknown"
+
+def get_max_size_for_extension(extension: str) -> int:
+    """Get max file size based on extension."""
+    if extension in IMAGE_EXTENSIONS:
+        return MAX_IMAGE_SIZE
+    elif extension in VIDEO_EXTENSIONS:
+        return MAX_VIDEO_SIZE
+    return MAX_IMAGE_SIZE
 
 def generate_file_id() -> str:
     """Generate unique file ID."""
@@ -59,11 +78,29 @@ def get_file_path(file_id: str, extension: str) -> Path:
     """Get full file path for a file ID."""
     return UPLOAD_DIR / f"{file_id}{extension}"
 
+def get_media_type(extension: str) -> str:
+    """Get proper MIME type for file extension."""
+    media_types = {
+        # Images
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        # Videos
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+    }
+    return media_types.get(extension, "application/octet-stream")
 
 @router.post("/upload", response_model=FileUploadResponse)
 async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
     """
-    Upload a single image file.
+    Upload a single image or video file.
+    
+    Images: Max 10MB
+    Videos: Max 25MB
     
     Returns file_id and URL that can be used in chat messages.
     """
@@ -72,17 +109,22 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"File type not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+            detail=f"File type not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
         )
+    
+    # Get file type and size limit
+    file_type = get_file_type(extension)
+    max_size = get_max_size_for_extension(extension)
     
     # Read file content
     content = await file.read()
     
     # Validate size
-    if len(content) > MAX_FILE_SIZE:
+    if len(content) > max_size:
+        max_size_mb = max_size // (1024 * 1024)
         raise HTTPException(
             status_code=400,
-            detail=f"File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB"
+            detail=f"{file_type.capitalize()} file too large. Maximum size: {max_size_mb}MB"
         )
     
     # Generate file ID and save
@@ -92,21 +134,27 @@ async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
     with open(file_path, "wb") as f:
         f.write(content)
     
+    # Determine content type
+    content_type = file.content_type or get_media_type(extension)
+    
     return FileUploadResponse(
         file_id=file_id,
         filename=file.filename or f"{file_id}{extension}",
         url=f"/api/v1/files/{file_id}{extension}",
         size=len(content),
-        content_type=file.content_type or "image/jpeg"
+        content_type=content_type,
+        file_type=file_type
     )
-
 
 @router.post("/upload/multiple", response_model=MultiFileUploadResponse)
 async def upload_multiple_files(
     files: List[UploadFile] = File(...)
 ) -> MultiFileUploadResponse:
     """
-    Upload multiple image files at once.
+    Upload multiple image/video files at once.
+    
+    Images: Max 10MB each
+    Videos: Max 25MB each
     
     Returns list of file_ids and URLs.
     """
@@ -118,15 +166,20 @@ async def upload_multiple_files(
         if extension not in ALLOWED_EXTENSIONS:
             raise HTTPException(
                 status_code=400,
-                detail=f"File '{file.filename}' type not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+                detail=f"File '{file.filename}' type not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
             )
+        
+        # Get file type and size limit
+        file_type = get_file_type(extension)
+        max_size = get_max_size_for_extension(extension)
         
         # Read and validate size
         content = await file.read()
-        if len(content) > MAX_FILE_SIZE:
+        if len(content) > max_size:
+            max_size_mb = max_size // (1024 * 1024)
             raise HTTPException(
                 status_code=400,
-                detail=f"File '{file.filename}' too large. Maximum: {MAX_FILE_SIZE // (1024*1024)}MB"
+                detail=f"{file_type.capitalize()} '{file.filename}' too large. Maximum: {max_size_mb}MB"
             )
         
         # Generate ID and save
@@ -136,21 +189,24 @@ async def upload_multiple_files(
         with open(file_path, "wb") as f:
             f.write(content)
         
+        # Determine content type
+        content_type = file.content_type or get_media_type(extension)
+        
         results.append(FileUploadResponse(
             file_id=file_id,
             filename=file.filename or f"{file_id}{extension}",
             url=f"/api/v1/files/{file_id}{extension}",
             size=len(content),
-            content_type=file.content_type or "image/jpeg"
+            content_type=content_type,
+            file_type=file_type
         ))
     
     return MultiFileUploadResponse(files=results)
 
-
 @router.get("/files/{filename}")
 async def get_file(filename: str) -> FileResponse:
     """
-    Serve uploaded files.
+    Serve uploaded files (images and videos).
     
     This endpoint serves files from the /images directory.
     """
@@ -169,14 +225,7 @@ async def get_file(filename: str) -> FileResponse:
     
     # Determine media type
     extension = get_file_extension(filename)
-    media_types = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-        ".gif": "image/gif",
-    }
-    media_type = media_types.get(extension, "application/octet-stream")
+    media_type = get_media_type(extension)
     
     return FileResponse(file_path, media_type=media_type)
 
@@ -185,15 +234,23 @@ async def get_file(filename: str) -> FileResponse:
 async def delete_file(file_id: str) -> dict:
     """
     Delete an uploaded file.
+    
+    Searches for the file with any allowed extension and deletes it.
     """
-    # Find file with any extension
+    deleted = False
+    
     for ext in ALLOWED_EXTENSIONS:
         file_path = get_file_path(file_id, ext)
         if file_path.exists():
             file_path.unlink()
-            return {"deleted": True, "file_id": file_id}
+            deleted = True
+            break
     
-    raise HTTPException(status_code=404, detail="File not found")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return {"message": "File deleted successfully", "file_id": file_id}
+
 
 
 # === Generated Images ===

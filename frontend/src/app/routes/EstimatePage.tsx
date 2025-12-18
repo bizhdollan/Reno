@@ -4,10 +4,10 @@ import remarkGfm from "remark-gfm";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   Send, X, Paperclip, Check, ChevronDown, ChevronUp, Camera, SwitchCamera,
-  Bot, User, Sparkles, CheckCircle2, Circle
+  Bot, User, Sparkles, CheckCircle2, Circle, Play, RotateCcw, Film
 } from "lucide-react";
 import rehypeRaw from "rehype-raw";
-import ImageLightbox from "../../components/shared/ImageLightbox";
+import ImageLightbox from "../../components/shared/ImageLightBox";
 
 // ==================== TYPES ====================
 interface Message {
@@ -61,6 +61,8 @@ interface UploadedFile {
   uploaded?: { file_id: string; url: string };
   uploading?: boolean;
   error?: string;
+  isVideo?: boolean;
+  duration?: number;
 }
 
 interface FileUploadResponse {
@@ -81,6 +83,7 @@ const STAGES = [
 ];
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+const MAX_VIDEO_SIZE = 25 * 1024 * 1024; // 25MB
 
 // ==================== UTILITIES ====================
 function formatCurrency(amount: number): string {
@@ -91,6 +94,16 @@ function formatTime(timestamp: string): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function formatDuration(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+function isVideoFile(file: File): boolean {
+  return file.type.startsWith('video/');
+}
+
 async function uploadFile(file: File): Promise<FileUploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
@@ -98,6 +111,69 @@ async function uploadFile(file: File): Promise<FileUploadResponse> {
   if (!response.ok) throw new Error(await response.text() || "Upload failed");
   return response.json();
 }
+
+// // Generate thumbnail from video blob - extract first frame
+// async function generateVideoThumbnail(videoBlob: Blob): Promise<string> {
+//   return new Promise((resolve, reject) => {
+//     const video = document.createElement('video');
+//     const canvas = document.createElement('canvas');
+//     const ctx = canvas.getContext('2d');
+    
+//     video.preload = 'metadata';
+//     video.muted = true;
+//     video.playsInline = true;
+    
+//     const url = URL.createObjectURL(videoBlob);
+    
+//     video.onloadeddata = () => {
+//       // Seek to first frame
+//       video.currentTime = 0.1;
+//     };
+    
+//     video.onseeked = () => {
+//       canvas.width = video.videoWidth;
+//       canvas.height = video.videoHeight;
+      
+//       if (ctx) {
+//         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+//         const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.8);
+//         URL.revokeObjectURL(url);
+//         resolve(thumbnailUrl);
+//       } else {
+//         URL.revokeObjectURL(url);
+//         reject(new Error('Could not get canvas context'));
+//       }
+//     };
+    
+//     video.onerror = () => {
+//       URL.revokeObjectURL(url);
+//       reject(new Error('Failed to load video'));
+//     };
+    
+//     video.src = url;
+//   });
+// }
+
+// // Get video duration
+// async function getVideoDuration(videoBlob: Blob): Promise<number> {
+//   return new Promise((resolve) => {
+//     const video = document.createElement('video');
+//     video.preload = 'metadata';
+//     const url = URL.createObjectURL(videoBlob);
+    
+//     video.onloadedmetadata = () => {
+//       URL.revokeObjectURL(url);
+//       resolve(video.duration);
+//     };
+    
+//     video.onerror = () => {
+//       URL.revokeObjectURL(url);
+//       resolve(0);
+//     };
+    
+//     video.src = url;
+//   });
+// }
 
 // ==================== PROGRESS BAR ====================
 const ProgressBar = memo(function ProgressBar({ currentStage }: { currentStage: string }) {
@@ -141,7 +217,6 @@ const ProgressBar = memo(function ProgressBar({ currentStage }: { currentStage: 
                 )}
               </motion.div>
               
-              {/* Label - smaller on mobile */}
               <p className={`text-[10px] sm:text-xs font-medium mt-1 sm:mt-2 text-center ${
                 isCurrent ? "text-amber-600 dark:text-amber-400" : "text-navy-500 dark:text-navy-400"
               }`}>
@@ -179,8 +254,7 @@ function TypingIndicator() {
   );
 }
 
-// ==================== IMAGE PREVIEW ====================
-// Image Preview - FIXED HEIGHT VERSION
+// ==================== IMAGE/VIDEO PREVIEW ====================
 const ImagePreview = memo(function ImagePreview({ files, onRemove }: { files: UploadedFile[]; onRemove: (i: number) => void }) {
   if (files.length === 0) return null;
   
@@ -199,6 +273,7 @@ const ImagePreview = memo(function ImagePreview({ files, onRemove }: { files: Up
           transition={{ delay: idx * 0.05 }}
           className="relative flex-shrink-0 group"
         >
+          {/* Thumbnail */}
           <img 
             src={file.preview} 
             alt={`Preview ${idx + 1}`}
@@ -206,17 +281,46 @@ const ImagePreview = memo(function ImagePreview({ files, onRemove }: { files: Up
               file.uploading ? "border-amber-400 opacity-70" : file.error ? "border-red-400" : file.uploaded ? "border-emerald-400" : "border-navy-200 dark:border-navy-600"
             }`} 
           />
+          
+          {/* Video indicator overlay */}
+          {file.isVideo && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="w-8 h-8 rounded-full bg-black/50 flex items-center justify-center">
+                <Play size={14} className="text-white ml-0.5" fill="white" />
+              </div>
+              {file.duration !== undefined && (
+                <div className="absolute bottom-1 right-1 bg-black/70 text-white text-[8px] px-1 rounded">
+                  {formatDuration(file.duration)}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Uploading spinner */}
           {file.uploading && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/30 rounded-lg">
               <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} className="w-5 h-5 border-2 border-white border-t-transparent rounded-full" />
             </div>
           )}
-          {file.uploaded && (
+          
+          {/* Upload success indicator */}
+          {file.uploaded && !file.isVideo && (
             <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="absolute bottom-0.5 right-0.5 bg-emerald-500 text-white rounded-full p-0.5">
               <Check size={8} />
             </motion.div>
           )}
+          
+          {/* Video upload success - show film icon instead */}
+          {file.uploaded && file.isVideo && (
+            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="absolute bottom-0.5 left-0.5 bg-emerald-500 text-white rounded-full p-0.5">
+              <Film size={8} />
+            </motion.div>
+          )}
+          
+          {/* Error indicator */}
           {file.error && <div className="absolute bottom-0.5 right-0.5 bg-red-500 text-white text-[8px] px-1 rounded">!</div>}
+          
+          {/* Remove button */}
           <button onClick={() => onRemove(idx)} className="absolute -top-1.5 -right-1.5 bg-red-500 hover:bg-red-600 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-all shadow-md">
             <X size={10} />
           </button>
@@ -226,45 +330,248 @@ const ImagePreview = memo(function ImagePreview({ files, onRemove }: { files: Up
   );
 });
 
-// ==================== CAMERA MODAL ====================
+// ==================== CAMERA MODAL WITH VIDEO RECORDING ====================
+
 interface CameraModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onCapture: (file: File) => void;
+  onCapture: (file: File, thumbnail?: string, duration?: number) => void;
 }
+
+type ModalMode = 'camera' | 'photo-preview' | 'video-preview';
+
+// Generate thumbnail from video blob - extract first frame
+async function generateVideoThumbnail(videoBlob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    
+    const url = URL.createObjectURL(videoBlob);
+    
+    video.onloadeddata = () => {
+      video.currentTime = 0.1;
+    };
+    
+    video.onseeked = () => {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.8);
+        URL.revokeObjectURL(url);
+        resolve(thumbnailUrl);
+      } else {
+        URL.revokeObjectURL(url);
+        reject(new Error('Could not get canvas context'));
+      }
+    };
+    
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Failed to load video'));
+    };
+    
+    video.src = url;
+  });
+}
+
+// Get video duration
+async function getVideoDuration(videoBlob: Blob): Promise<number> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    const url = URL.createObjectURL(videoBlob);
+    
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(video.duration);
+    };
+    
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(0);
+    };
+    
+    video.src = url;
+  });
+}
+
+// Separate progress ring component to minimize re-renders
+const ProgressRing = memo(function ProgressRing({ progress }: { progress: number }) {
+  const circumference = 2 * Math.PI * 46;
+  const strokeDashoffset = circumference * (1 - progress / 100);
+  
+  return (
+    <svg 
+      className="absolute inset-0 w-full h-full"
+      viewBox="0 0 96 96"
+      style={{ transform: 'rotate(-90deg)' }}
+    >
+      <circle
+        cx="48"
+        cy="48"
+        r="46"
+        stroke="rgba(239, 68, 68, 0.3)"
+        strokeWidth="4"
+        fill="none"
+      />
+      <circle
+        cx="48"
+        cy="48"
+        r="46"
+        stroke="rgb(239, 68, 68)"
+        strokeWidth="4"
+        fill="none"
+        strokeDasharray={circumference}
+        strokeDashoffset={strokeDashoffset}
+        strokeLinecap="round"
+        style={{ transition: 'stroke-dashoffset 0.1s linear' }}
+      />
+    </svg>
+  );
+});
 
 function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [stream, setStream] = useState<MediaStream | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const progressRef = useRef<number>(0);
+  const rafIdRef = useRef<number | null>(null);
+  const recordingStartTimeRef = useRef<number>(0);
+  const isLongPressRef = useRef<boolean>(false);
+  const streamRef = useRef<MediaStream | null>(null);
+
   const [facingMode, setFacingMode] = useState<"user" | "environment">("environment");
   const [error, setError] = useState<string | null>(null);
-  const [isCapturing, setIsCapturing] = useState(false);
+  const [mode, setMode] = useState<ModalMode>('camera');
+  const [cameraReady, setCameraReady] = useState(false);
+  
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingProgress, setRecordingProgress] = useState(0);
+  const [recordingTimeLeft, setRecordingTimeLeft] = useState(5);
+  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null);
+  const [capturedThumbnail, setCapturedThumbnail] = useState<string | null>(null);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 
+  const MAX_RECORDING_TIME = 5000; // 5 seconds
+  const LONG_PRESS_THRESHOLD = 500; // 500ms to trigger video mode (increased from 300)
+
+  // Start camera - simplified and fixed
   const startCamera = useCallback(async (facing: "user" | "environment") => {
     try {
-      if (stream) stream.getTracks().forEach(track => track.stop());
+      // Stop existing stream first
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+      
+      setCameraReady(false);
       setError(null);
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false
-      });
-      setStream(mediaStream);
-      if (videoRef.current) videoRef.current.srcObject = mediaStream;
+      
+      // Request camera WITHOUT audio
+      const constraints: MediaStreamConstraints = {
+        video: { 
+          facingMode: facing,
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false // DISABLED audio
+      };
+      
+      console.log('Requesting camera with constraints:', constraints);
+      
+      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      console.log('Got media stream:', mediaStream.getTracks().map(t => ({ kind: t.kind, label: t.label, enabled: t.enabled })));
+      
+      streamRef.current = mediaStream;
+      
+      // Attach to video element
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+        
+        // Wait for video to be ready
+        videoRef.current.onloadedmetadata = () => {
+          console.log('Video metadata loaded');
+          videoRef.current?.play()
+            .then(() => {
+              console.log('Video playing');
+              setCameraReady(true);
+            })
+            .catch(err => {
+              console.error('Video play error:', err);
+              setError('Failed to start video preview');
+            });
+        };
+      }
     } catch (err) {
       console.error("Camera error:", err);
-      setError("Unable to access camera. Please check permissions.");
+      setError(`Camera error: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
-  }, [stream]);
+  }, []);
 
   const stopCamera = useCallback(() => {
-    if (stream) { stream.getTracks().forEach(track => track.stop()); setStream(null); }
-  }, [stream]);
+    console.log('Stopping camera');
+    if (streamRef.current) { 
+      streamRef.current.getTracks().forEach(track => {
+        console.log('Stopping track:', track.kind, track.label);
+        track.stop();
+      });
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraReady(false);
+  }, []);
 
+  // Start camera when modal opens
   useEffect(() => {
-    if (isOpen) startCamera(facingMode);
-    else stopCamera();
-    return () => stopCamera();
+    if (isOpen && mode === 'camera') {
+      console.log('Modal opened, starting camera');
+      startCamera(facingMode);
+    }
+    
+    return () => {
+      if (!isOpen) {
+        stopCamera();
+      }
+    };
+  }, [isOpen, mode, facingMode, startCamera, stopCamera]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopCamera();
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, [stopCamera]);
+
+  // Reset state when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      setMode('camera');
+      setCapturedBlob(null);
+      setCapturedThumbnail(null);
+      setIsRecording(false);
+      setRecordingProgress(0);
+      setRecordingTimeLeft(5);
+      isLongPressRef.current = false;
+    }
   }, [isOpen]);
 
   const switchCamera = useCallback(() => {
@@ -273,56 +580,502 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
     startCamera(newFacing);
   }, [facingMode, startCamera]);
 
+  // Capture photo
   const capturePhoto = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current) return;
-    setIsCapturing(true);
+    console.log('Capturing photo');
+    if (!videoRef.current || !canvasRef.current) {
+      console.error('Video or canvas ref not available');
+      return;
+    }
+    
     const video = videoRef.current;
     const canvas = canvasRef.current;
+    
+    // Make sure video has dimensions
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      console.error('Video has no dimensions');
+      setError('Camera not ready. Please try again.');
+      return;
+    }
+    
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
+    
     const ctx = canvas.getContext("2d");
     if (ctx) {
       ctx.drawImage(video, 0, 0);
       canvas.toBlob((blob) => {
         if (blob) {
-          const file = new File([blob], `camera_${Date.now()}.jpg`, { type: "image/jpeg" });
-          onCapture(file);
-          onClose();
+          console.log('Photo captured, size:', blob.size);
+          setCapturedBlob(blob);
+          setCapturedThumbnail(canvas.toDataURL('image/jpeg', 0.8));
+          setMode('photo-preview');
+          stopCamera();
         }
-        setIsCapturing(false);
       }, "image/jpeg", 0.9);
     }
-  }, [onCapture, onClose]);
+  }, [stopCamera]);
+
+  // Start video recording
+  const startRecording = useCallback(() => {
+    console.log('Starting recording');
+    
+    if (!streamRef.current) {
+      console.error('No stream available for recording');
+      setError('Camera not ready for recording');
+      return;
+    }
+
+    recordedChunksRef.current = [];
+    
+    try {
+      // Determine supported mime type
+      let mimeType = 'video/webm';
+      if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+        mimeType = 'video/webm;codecs=vp9';
+      } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+        mimeType = 'video/webm;codecs=vp8';
+      } else if (MediaRecorder.isTypeSupported('video/webm')) {
+        mimeType = 'video/webm';
+      } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+        mimeType = 'video/mp4';
+      }
+      
+      console.log('Using mime type:', mimeType);
+      
+      const mediaRecorder = new MediaRecorder(streamRef.current, {
+        mimeType,
+        videoBitsPerSecond: 2500000
+      });
+      
+      mediaRecorder.ondataavailable = (event) => {
+        console.log('Data available:', event.data.size);
+        if (event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        console.log('Recording stopped, chunks:', recordedChunksRef.current.length);
+        
+        if (rafIdRef.current) {
+          cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
+        
+        if (recordedChunksRef.current.length === 0) {
+          console.error('No recorded chunks');
+          setError('Recording failed - no data captured');
+          setIsRecording(false);
+          return;
+        }
+        
+        const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+        console.log('Created blob, size:', blob.size);
+        
+        // Generate thumbnail
+        try {
+          const thumbnail = await generateVideoThumbnail(blob);
+          setCapturedThumbnail(thumbnail);
+        } catch (err) {
+          console.warn('Failed to generate thumbnail:', err);
+          setCapturedThumbnail(null);
+        }
+        
+        setCapturedBlob(blob);
+        setMode('video-preview');
+        setIsRecording(false);
+        setRecordingProgress(0);
+        setRecordingTimeLeft(5);
+        progressRef.current = 0;
+        stopCamera();
+      };
+
+      mediaRecorder.onerror = (event) => {
+        console.error('MediaRecorder error:', event);
+        setError('Recording error occurred');
+        setIsRecording(false);
+      };
+
+      // Start recording with timeslice for periodic data
+      mediaRecorder.start(100); // Get data every 100ms
+      mediaRecorderRef.current = mediaRecorder;
+      recordingStartTimeRef.current = performance.now();
+      setIsRecording(true);
+
+      // Progress updates using RAF but throttled state updates
+      let lastStateUpdate = 0;
+      
+      const updateProgress = (timestamp: number) => {
+        if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') {
+          return;
+        }
+        
+        const elapsed = timestamp - recordingStartTimeRef.current;
+        const progress = Math.min((elapsed / MAX_RECORDING_TIME) * 100, 100);
+        progressRef.current = progress;
+        
+        // Update React state every 100ms
+        if (timestamp - lastStateUpdate > 100) {
+          lastStateUpdate = timestamp;
+          setRecordingProgress(progress);
+          setRecordingTimeLeft(Math.max(0, Math.ceil((MAX_RECORDING_TIME - elapsed) / 1000)));
+        }
+
+        if (elapsed >= MAX_RECORDING_TIME) {
+          console.log('Max recording time reached, stopping');
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            mediaRecorderRef.current.stop();
+          }
+        } else {
+          rafIdRef.current = requestAnimationFrame(updateProgress);
+        }
+      };
+
+      rafIdRef.current = requestAnimationFrame(updateProgress);
+      
+    } catch (err) {
+      console.error("Recording error:", err);
+      setError(`Recording error: ${err instanceof Error ? err.message : 'Unknown'}`);
+      setIsRecording(false);
+    }
+  }, [stopCamera]);
+
+  // Stop video recording
+  const stopRecording = useCallback(() => {
+    console.log('stopRecording called, recorder state:', mediaRecorderRef.current?.state);
+    
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+    if (rafIdRef.current) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+  }, []);
+
+  // Handle press start
+  const handlePressStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    
+    if (!cameraReady) {
+      console.log('Camera not ready, ignoring press');
+      return;
+    }
+    
+    console.log('Press start');
+    isLongPressRef.current = false;
+    
+    // Start long-press timer
+    longPressTimerRef.current = setTimeout(() => {
+      console.log('Long press threshold reached, starting recording');
+      isLongPressRef.current = true;
+      startRecording();
+    }, LONG_PRESS_THRESHOLD);
+  }, [cameraReady, startRecording]);
+
+  // Handle press end
+  const handlePressEnd = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    
+    console.log('Press end, isRecording:', isRecording, 'isLongPress:', isLongPressRef.current);
+    
+    // Clear the long press timer
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+
+    if (isRecording) {
+      // Was recording, stop it
+      console.log('Stopping recording');
+      stopRecording();
+    } else if (!isLongPressRef.current) {
+      // Quick tap - take photo
+      console.log('Quick tap, taking photo');
+      capturePhoto();
+    }
+    
+    isLongPressRef.current = false;
+  }, [isRecording, stopRecording, capturePhoto]);
+
+  // Handle press cancel (mouse leave, touch cancel)
+  const handlePressCancel = useCallback(() => {
+    console.log('Press cancel');
+    
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    
+    if (isRecording) {
+      stopRecording();
+    }
+    
+    isLongPressRef.current = false;
+  }, [isRecording, stopRecording]);
+
+  // Retake
+  const handleRetake = useCallback(() => {
+    setCapturedBlob(null);
+    setCapturedThumbnail(null);
+    setMode('camera');
+    startCamera(facingMode);
+  }, [facingMode, startCamera]);
+
+  // Confirm and send
+  const handleConfirm = useCallback(async () => {
+    if (!capturedBlob) return;
+
+    const isVideo = mode === 'video-preview';
+    const extension = isVideo ? 'webm' : 'jpg';
+    const mimeType = isVideo ? (capturedBlob.type || 'video/webm') : 'image/jpeg';
+    const file = new File([capturedBlob], `capture_${Date.now()}.${extension}`, { type: mimeType });
+    
+    let duration: number | undefined;
+    if (isVideo) {
+      duration = await getVideoDuration(capturedBlob);
+    }
+    
+    onCapture(file, capturedThumbnail || undefined, duration);
+    onClose();
+  }, [capturedBlob, capturedThumbnail, mode, onCapture, onClose]);
+
+  // Video preview playback
+  const toggleVideoPlayback = useCallback(() => {
+    if (!previewVideoRef.current) return;
+    
+    if (isVideoPlaying) {
+      previewVideoRef.current.pause();
+    } else {
+      previewVideoRef.current.play();
+    }
+    setIsVideoPlaying(!isVideoPlaying);
+  }, [isVideoPlaying]);
+
+  // Load video preview
+  useEffect(() => {
+    if (mode === 'video-preview' && capturedBlob && previewVideoRef.current) {
+      const url = URL.createObjectURL(capturedBlob);
+      previewVideoRef.current.src = url;
+      return () => URL.revokeObjectURL(url);
+    }
+  }, [mode, capturedBlob]);
 
   if (!isOpen) return null;
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-black flex flex-col">
-      <div className="flex items-center justify-between p-4 bg-black/50">
-        <button onClick={onClose} className="text-white p-2 hover:bg-white/10 rounded-lg transition-colors"><X size={24} /></button>
-        <span className="text-white font-medium">Take Photo</span>
-        <button onClick={switchCamera} className="text-white p-2 hover:bg-white/10 rounded-lg transition-colors"><SwitchCamera size={24} /></button>
-      </div>
-      <div className="flex-1 relative flex items-center justify-center bg-black">
-        {error ? (
-          <div className="text-white text-center p-4">
-            <p className="mb-4">{error}</p>
-            <button onClick={() => startCamera(facingMode)} className="px-4 py-2 bg-amber-500 rounded-lg font-medium">Try Again</button>
+    <motion.div 
+      initial={{ opacity: 0 }} 
+      animate={{ opacity: 1 }} 
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 bg-black"
+    >
+      {/* Camera Mode */}
+      {mode === 'camera' && (
+        <>
+          {/* Header */}
+          <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between p-4 bg-gradient-to-b from-black/70 to-transparent">
+            <button 
+              onClick={onClose} 
+              className="text-white p-2 hover:bg-white/10 rounded-lg transition-colors"
+            >
+              <X size={24} />
+            </button>
+            
+            <div className="flex items-center gap-3">
+              {isRecording && (
+                <motion.div 
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  className="flex items-center gap-2"
+                >
+                  <motion.div
+                    animate={{ opacity: [1, 0.3, 1] }}
+                    transition={{ duration: 1, repeat: Infinity }}
+                    className="w-3 h-3 bg-red-500 rounded-full"
+                  />
+                  <span className="text-white font-bold text-lg">{recordingTimeLeft}s</span>
+                </motion.div>
+              )}
+              
+              {!cameraReady && !error && (
+                <span className="text-white/70 text-sm">Loading camera...</span>
+              )}
+            </div>
+
+            <button 
+              onClick={switchCamera} 
+              disabled={isRecording || !cameraReady}
+              className="text-white p-2 hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50"
+            >
+              <SwitchCamera size={24} />
+            </button>
           </div>
-        ) : (
-          <video ref={videoRef} autoPlay playsInline muted className="max-h-full max-w-full object-contain" />
-        )}
-        <canvas ref={canvasRef} className="hidden" />
-      </div>
-      <div className="p-6 bg-black/50 flex justify-center">
-        <motion.button onClick={capturePhoto} disabled={!!error || isCapturing} whileTap={{ scale: 0.95 }} className="w-16 h-16 rounded-full bg-white border-4 border-gray-300 flex items-center justify-center disabled:opacity-50">
-          {isCapturing ? (
-            <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} className="w-6 h-6 border-2 border-gray-600 border-t-transparent rounded-full" />
-          ) : (
-            <div className="w-12 h-12 rounded-full bg-white border-2 border-gray-400" />
-          )}
-        </motion.button>
-      </div>
+
+          {/* Video Preview */}
+          <div className="w-full h-full relative overflow-hidden bg-black">
+            {error ? (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="text-white text-center p-4">
+                  <p className="mb-4">{error}</p>
+                  <button 
+                    onClick={() => startCamera(facingMode)} 
+                    className="px-4 py-2 bg-amber-500 rounded-lg font-medium hover:bg-amber-600 transition-colors"
+                  >
+                    Try Again
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <video 
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover"
+              />
+            )}
+            <canvas ref={canvasRef} className="hidden" />
+          </div>
+
+          {/* Bottom Controls */}
+          <div className="absolute bottom-0 left-0 right-0 z-10 pb-8 pt-6 bg-gradient-to-t from-black/70 to-transparent flex flex-col items-center gap-3">
+            <p className="text-white text-sm font-medium opacity-70">
+              {isRecording ? "Recording..." : "Tap for photo • Hold for video"}
+            </p>
+            
+            {/* Capture Button */}
+            <div className="relative w-24 h-24 flex items-center justify-center">
+              {/* Progress ring */}
+              {isRecording && (
+                <div className="absolute inset-0">
+                  <ProgressRing progress={recordingProgress} />
+                </div>
+              )}
+
+              {/* Button */}
+              <button
+                onMouseDown={handlePressStart}
+                onMouseUp={handlePressEnd}
+                onMouseLeave={handlePressCancel}
+                onTouchStart={handlePressStart}
+                onTouchEnd={handlePressEnd}
+                onTouchCancel={handlePressCancel}
+                disabled={!!error || !cameraReady}
+                className="relative w-20 h-20 rounded-full bg-white border-4 border-gray-300 flex items-center justify-center disabled:opacity-50 shadow-2xl active:scale-95 transition-transform touch-none"
+              >
+                <div 
+                  className={`w-14 h-14 border-2 border-gray-400 transition-all duration-200 ${
+                    isRecording 
+                      ? 'bg-red-500 rounded-lg scale-50' 
+                      : 'bg-white rounded-full'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Photo Preview Mode */}
+      {mode === 'photo-preview' && capturedBlob && (
+        <div className="w-full h-full flex flex-col">
+          <div className="flex-shrink-0 flex items-center justify-between p-4 bg-black/50">
+            <button onClick={onClose} className="text-white p-2 hover:bg-white/10 rounded-lg">
+              <X size={24} />
+            </button>
+            <span className="text-white font-medium text-lg">Photo Preview</span>
+            <div className="w-10" />
+          </div>
+
+          <div className="flex-1 flex items-center justify-center bg-black overflow-hidden">
+            <img 
+              src={capturedThumbnail || URL.createObjectURL(capturedBlob)} 
+              alt="Captured" 
+              className="max-w-full max-h-full object-contain"
+            />
+          </div>
+
+          <div className="flex-shrink-0 flex gap-4 p-6 bg-black/50">
+            <motion.button
+              onClick={handleRetake}
+              whileTap={{ scale: 0.95 }}
+              className="flex-1 flex items-center justify-center gap-2 py-3 px-6 bg-white/10 text-white rounded-xl font-medium hover:bg-white/20 transition-colors"
+            >
+              <RotateCcw size={20} />
+              Retake
+            </motion.button>
+            <motion.button
+              onClick={handleConfirm}
+              whileTap={{ scale: 0.95 }}
+              className="flex-1 flex items-center justify-center gap-2 py-3 px-6 bg-amber-500 text-white rounded-xl font-medium hover:bg-amber-600 transition-colors shadow-lg"
+            >
+              <Check size={20} />
+              Use This
+            </motion.button>
+          </div>
+        </div>
+      )}
+
+      {/* Video Preview Mode */}
+      {mode === 'video-preview' && capturedBlob && (
+        <div className="w-full h-full flex flex-col">
+          <div className="flex-shrink-0 flex items-center justify-between p-4 bg-black/50">
+            <button onClick={onClose} className="text-white p-2 hover:bg-white/10 rounded-lg">
+              <X size={24} />
+            </button>
+            <span className="text-white font-medium text-lg">Video Preview</span>
+            <div className="w-10" />
+          </div>
+
+          <div className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
+            <video 
+              ref={previewVideoRef}
+              loop
+              playsInline
+              className="max-w-full max-h-full object-contain"
+              onPlay={() => setIsVideoPlaying(true)}
+              onPause={() => setIsVideoPlaying(false)}
+              onEnded={() => setIsVideoPlaying(false)}
+            />
+            
+            <button
+              onClick={toggleVideoPlayback}
+              className="absolute inset-0 flex items-center justify-center"
+            >
+              {!isVideoPlaying && (
+                <motion.div
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  className="w-20 h-20 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center"
+                >
+                  <Play size={32} className="text-white ml-1" fill="white" />
+                </motion.div>
+              )}
+            </button>
+          </div>
+
+          <div className="flex-shrink-0 flex gap-4 p-6 bg-black/50">
+            <motion.button
+              onClick={handleRetake}
+              whileTap={{ scale: 0.95 }}
+              className="flex-1 flex items-center justify-center gap-2 py-3 px-6 bg-white/10 text-white rounded-xl font-medium hover:bg-white/20 transition-colors"
+            >
+              <RotateCcw size={20} />
+              Retake
+            </motion.button>
+            <motion.button
+              onClick={handleConfirm}
+              whileTap={{ scale: 0.95 }}
+              className="flex-1 flex items-center justify-center gap-2 py-3 px-6 bg-amber-500 text-white rounded-xl font-medium hover:bg-amber-600 transition-colors shadow-lg"
+            >
+              <Check size={20} />
+              Use This
+            </motion.button>
+          </div>
+        </div>
+      )}
     </motion.div>
   );
 }
@@ -561,15 +1314,65 @@ export default function EstimatePage() {
     start();
   }, [projectId]);
 
-  const addFileToUpload = useCallback(async (file: File) => {
-    const preview = URL.createObjectURL(file);
-    const fileEntry: UploadedFile = { file, preview, uploading: true };
+  // Add file to upload with video support
+  const addFileToUpload = useCallback(async (file: File, thumbnail?: string, duration?: number) => {
+    const isVideo = isVideoFile(file);
+    
+    // Validate video size
+    if (isVideo && file.size > MAX_VIDEO_SIZE) {
+      setError(`Video too large. Maximum size is 25MB. Your video is ${(file.size / (1024 * 1024)).toFixed(1)}MB`);
+      return;
+    }
+    
+    // Use provided thumbnail for videos, or create object URL for images
+    let preview: string;
+    if (thumbnail) {
+      preview = thumbnail;
+    } else if (isVideo) {
+      // Generate thumbnail for video files uploaded via file picker
+      try {
+        preview = await generateVideoThumbnail(file);
+      } catch {
+        // Fallback to a placeholder
+        preview = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="%23374151" width="64" height="64"/><polygon fill="%23fff" points="26,20 26,44 44,32"/></svg>';
+      }
+    } else {
+      preview = URL.createObjectURL(file);
+    }
+    
+    // Get duration for videos if not provided
+    let videoDuration = duration;
+    if (isVideo && videoDuration === undefined) {
+      try {
+        videoDuration = await getVideoDuration(file);
+      } catch {
+        videoDuration = undefined;
+      }
+    }
+    
+    const fileEntry: UploadedFile = { 
+      file, 
+      preview, 
+      uploading: true,
+      isVideo,
+      duration: videoDuration
+    };
+    
     setPendingFiles((prev) => [...prev, fileEntry]);
+    
     try {
       const result = await uploadFile(file);
-      setPendingFiles((prev) => prev.map((f) => f.preview === preview ? { ...f, uploading: false, uploaded: { file_id: result.file_id, url: result.url } } : f));
+      setPendingFiles((prev) => prev.map((f) => 
+        f.file === file 
+          ? { ...f, uploading: false, uploaded: { file_id: result.file_id, url: result.url } } 
+          : f
+      ));
     } catch (err) {
-      setPendingFiles((prev) => prev.map((f) => f.preview === preview ? { ...f, uploading: false, error: err instanceof Error ? err.message : "Upload failed" } : f));
+      setPendingFiles((prev) => prev.map((f) => 
+        f.file === file 
+          ? { ...f, uploading: false, error: err instanceof Error ? err.message : "Upload failed" } 
+          : f
+      ));
     }
   }, []);
 
@@ -579,8 +1382,22 @@ export default function EstimatePage() {
     for (const file of files) await addFileToUpload(file);
   }, [addFileToUpload]);
 
-  const handleCameraCapture = useCallback((file: File) => { addFileToUpload(file); }, [addFileToUpload]);
-  const removeFile = useCallback((index: number) => { setPendingFiles((prev) => { const file = prev[index]; if (file) URL.revokeObjectURL(file.preview); return prev.filter((_, i) => i !== index); }); }, []);
+  const handleCameraCapture = useCallback((file: File, thumbnail?: string, duration?: number) => { 
+    addFileToUpload(file, thumbnail, duration); 
+  }, [addFileToUpload]);
+  
+  const removeFile = useCallback((index: number) => { 
+    setPendingFiles((prev) => { 
+      const file = prev[index]; 
+      if (file && !file.isVideo) {
+        // Only revoke if it's an object URL (not a data URL from thumbnail)
+        if (file.preview.startsWith('blob:')) {
+          URL.revokeObjectURL(file.preview);
+        }
+      }
+      return prev.filter((_, i) => i !== index); 
+    }); 
+  }, []);
 
   const sendMessage = useCallback(async (overrideMessage?: string) => {
     if (isSending) return;
@@ -605,7 +1422,13 @@ export default function EstimatePage() {
     }
 
     setMessages((prev) => [...prev, { role: "user", content: displayContent, timestamp: new Date().toISOString() }]);
-    pendingFiles.forEach((f) => URL.revokeObjectURL(f.preview));
+    
+    // Clean up previews
+    pendingFiles.forEach((f) => {
+      if (f.preview.startsWith('blob:')) {
+        URL.revokeObjectURL(f.preview);
+      }
+    });
     setPendingFiles([]);
 
     try {
@@ -650,8 +1473,6 @@ export default function EstimatePage() {
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
           <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
-
-
             <AnimatePresence>
               {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onImageClick={setLightboxImage} />)}
             </AnimatePresence>
@@ -665,7 +1486,12 @@ export default function EstimatePage() {
       <AnimatePresence>
         {error && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} className="flex-shrink-0 border-t border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/20 px-4 py-3">
-            <div className="max-w-4xl mx-auto"><p className="text-sm text-red-600 dark:text-red-400">{error}</p></div>
+            <div className="max-w-4xl mx-auto flex items-center justify-between">
+              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+              <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700">
+                <X size={16} />
+              </button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -681,10 +1507,10 @@ export default function EstimatePage() {
               <motion.button onClick={() => fileInputRef.current?.click()} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Attach images">
                 <Paperclip size={18} className="sm:w-5 sm:h-5" />
               </motion.button>
-              <motion.button onClick={() => setIsCameraOpen(true)} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Take photo">
+              <motion.button onClick={() => setIsCameraOpen(true)} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Take photo or video">
                 <Camera size={18} className="sm:w-5 sm:h-5" />
               </motion.button>
-              <input ref={fileInputRef} type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={handleFileSelect} className="hidden" />
+              <input ref={fileInputRef} type="file" multiple accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime" onChange={handleFileSelect} className="hidden" />
               <div className="flex-1">
                 <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Type your message..." disabled={isSending} rows={1} className="w-full resize-none rounded-xl border border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-800 px-3 py-2 sm:px-4 sm:py-3 text-sm text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent disabled:opacity-50 disabled:bg-navy-50 dark:disabled:bg-navy-900" />
               </div>
