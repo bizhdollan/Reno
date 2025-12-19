@@ -5,22 +5,50 @@ FastAPI application with:
 - Chat endpoint for LangGraph conversation flow
 - File upload endpoint for images
 - Static file serving for uploaded/generated images
+- PostgreSQL database integration
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import uvicorn
+from sqlalchemy import text
 
 from src.api.v1.chat import router as chat_router
 from src.api.v1.files import router as files_router
+from src.api.v1.projects import router as projects_router
+from src.api.v1.marketplace import router as marketplace_router
+from src.api.v1.unlock import router as unlock_router
+from src.db.database import engine, SessionLocal
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup/shutdown"""
+    # Startup
+    try:
+        # Test database connection
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        print("✅ Database connection successful")
+    except Exception as e:
+        print(f"⚠️ Database connection failed: {e}")
+        print("   Make sure PostgreSQL is running: docker-compose up -d")
+    
+    yield
+    
+    # Shutdown (cleanup if needed)
+    print("🔄 Shutting down...")
 
 
 app = FastAPI(
     title="RenovationTech API",
     description="AI-Powered Renovation Estimation & Marketplace",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS - allow all for development
@@ -35,6 +63,9 @@ app.add_middleware(
 # API routes
 app.include_router(chat_router)
 app.include_router(files_router)
+app.include_router(projects_router)
+app.include_router(marketplace_router)
+app.include_router(unlock_router)
 
 # Ensure images directory exists
 IMAGES_DIR = Path("images")
@@ -60,10 +91,20 @@ def root():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint"""
+    """Health check endpoint with database connectivity"""
+    db_status = "unknown"
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+    
     return {
-        "status": "healthy",
-        "service": "renovationtech-backend"
+        "status": "healthy" if db_status == "connected" else "degraded",
+        "service": "renovationtech-backend",
+        "database": db_status
     }
 
 

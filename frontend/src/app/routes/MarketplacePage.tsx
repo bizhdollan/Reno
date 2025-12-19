@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Search, 
@@ -17,37 +17,136 @@ import {
   RefreshCw,
   Users,
   Eye,
-  Sparkles
+  Sparkles,
+  Loader2
 } from 'lucide-react';
+import { api } from '../../lib/api';
 
 // ==================== TYPES ====================
 interface ProjectLead {
   id: string;
-  title: string;
-  projectType: string;
-  zipCode: string;
+  token: string;
+  projectType: string | null;
+  zipCode: string | null;
   createdAt: string;
-  tier: 'low' | 'mid' | 'high';
-  totalCost: number;
-  description: string;
+  totalCost: number | null;
+  description: string | null;
   isUnlocked: boolean;
-  thumbnails: string[];
-  // Unlocked data
+  // Unlocked data (from unlock endpoint)
   homeowner?: {
     name: string;
     email: string;
     phone: string;
   };
-  details?: {
-    materials: string[];
-    measurements: { sqft: number; rooms: number };
-    timeline: string;
-    notes: string;
-  };
 }
 
-// ==================== MOCK DATA ====================
-const MOCK_PROJECTS: ProjectLead[] = [
+// ==================== MAIN COMPONENT ====================
+export default function MarketplacePage() {
+  const [projects, setProjects] = useState<ProjectLead[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [searchZip, setSearchZip] = useState('');
+  const [selectedType, setSelectedType] = useState('All Project Types');
+  const [unlockingProject, setUnlockingProject] = useState<ProjectLead | null>(null);
+  const [viewingProject, setViewingProject] = useState<ProjectLead | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [unlockEmail, setUnlockEmail] = useState('');
+  const [isUnlocking, setIsUnlocking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Fetch projects from API
+  const fetchProjects = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      setError(null);
+      const filters: any = {};
+      if (searchZip) filters.zip_code = searchZip;
+      if (selectedType !== 'All Project Types') {
+        filters.project_type = selectedType.toLowerCase().replace(' ', '_');
+      }
+      
+      const data: any = await api.getMarketplaceProjects(filters);
+      // Backend returns a plain list[ProjectMarketplaceCard], not wrapped in an object
+      const projectsArray: any[] = Array.isArray(data) ? data : [];
+      const mappedProjects: ProjectLead[] = projectsArray.map((p: any) => ({
+        id: p.id,
+        token: p.token,
+        projectType: p.project_type || 'Other',
+        zipCode: p.zip_code || '',
+        createdAt: p.created_at,
+        totalCost: p.total_price ? parseFloat(p.total_price) : null,
+        description: p.brief_scope || '',
+        isUnlocked: false, // Will be updated when unlocked
+      }));
+      setProjects(mappedProjects);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load projects');
+      console.error('Failed to fetch projects:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [searchZip, selectedType]);
+
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
+
+  const handleRefresh = () => {
+    setIsRefreshing(true);
+    fetchProjects().finally(() => setIsRefreshing(false));
+  };
+
+  const handleUnlock = (project: ProjectLead) => {
+    setUnlockingProject(project);
+    setUnlockEmail('');
+  };
+
+  const handleConfirmUnlock = async () => {
+    if (!unlockingProject || !unlockEmail.trim()) {
+      setError('Please enter your email address');
+      return;
+    }
+
+    setIsUnlocking(true);
+    setError(null);
+
+    try {
+      const response = await api.initiateUnlock(unlockingProject.id, unlockEmail);
+      // Redirect to Stripe checkout
+      if (response.checkout_url) {
+        window.location.href = response.checkout_url;
+      } else {
+        setError('Failed to initiate payment. Please try again.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unlock project');
+    } finally {
+      setIsUnlocking(false);
+    }
+  };
+
+  const handleView = async (project: ProjectLead) => {
+    // Fetch unlock details to get homeowner info
+    try {
+      // For now, just show the project details
+      // In a real scenario, we'd fetch unlock details by token
+      setViewingProject(project);
+    } catch (err) {
+      setError('Failed to load project details');
+    }
+  };
+
+  const filteredProjects = useMemo(() => {
+    return projects.filter(p => {
+      const matchesZip = !searchZip || (p.zipCode && p.zipCode.includes(searchZip));
+      const matchesType = selectedType === 'All Project Types' || p.projectType === selectedType;
+      return matchesZip && matchesType;
+    });
+  }, [projects, searchZip, selectedType]);
+  
+  const activeLeads = projects.filter(p => !p.isUnlocked).length;
+
+  // ==================== MOCK DATA (for reference) ====================
+  const MOCK_PROJECTS: ProjectLead[] = [
   {
     id: '1',
     title: 'Modern Kitchen Renovation',
@@ -221,7 +320,14 @@ interface ProjectCardProps {
 }
 
 function ProjectCard({ project, onUnlock, onView }: ProjectCardProps) {
-  const tier = tierConfig[project.tier];
+  // Determine tier from cost (mock logic - adjust based on your pricing tiers)
+  const getTier = (cost: number | null): 'low' | 'mid' | 'high' => {
+    if (!cost) return 'mid';
+    if (cost < 20000) return 'low';
+    if (cost < 50000) return 'mid';
+    return 'high';
+  };
+  const tier = tierConfig[getTier(project.totalCost)];
   
   return (
     <motion.div
@@ -232,22 +338,9 @@ function ProjectCard({ project, onUnlock, onView }: ProjectCardProps) {
     >
       {/* Thumbnails */}
       <div className="relative h-40 bg-navy-100 dark:bg-navy-900 overflow-hidden">
-        {project.thumbnails.length > 0 ? (
-          <div className="flex h-full">
-            {project.thumbnails.slice(0, 2).map((thumb, idx) => (
-              <img 
-                key={idx} 
-                src={thumb} 
-                alt={`Project ${idx + 1}`} 
-                className={`h-full object-cover ${project.thumbnails.length > 1 ? 'w-1/2' : 'w-full'}`}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="h-full flex items-center justify-center">
-            <Home className="w-12 h-12 text-navy-300 dark:text-navy-600" />
-          </div>
-        )}
+        <div className="h-full flex items-center justify-center">
+          <Home className="w-12 h-12 text-navy-300 dark:text-navy-600" />
+        </div>
         
         {/* Status badge */}
         <div className={`absolute top-3 right-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
@@ -281,17 +374,23 @@ function ProjectCard({ project, onUnlock, onView }: ProjectCardProps) {
           <span className="px-2.5 py-1 bg-navy-100 dark:bg-navy-700 text-navy-700 dark:text-navy-300 text-xs font-medium rounded-full">
             {project.projectType}
           </span>
-          <span className={`px-2.5 py-1 text-xs font-medium rounded-full ${tier.color}`}>
-            {tier.label}
-          </span>
+          {project.totalCost && (
+            <span className={`px-2.5 py-1 text-xs font-medium rounded-full ${tier.color}`}>
+              {tier.label}
+            </span>
+          )}
         </div>
         
-        <div className="flex items-baseline gap-1 mb-3">
-          <DollarSign className="w-4 h-4 text-amber-500" />
-          <span className="text-2xl font-bold text-navy-900 dark:text-white">{formatCurrency(project.totalCost)}</span>
-        </div>
+        {project.totalCost && (
+          <div className="flex items-baseline gap-1 mb-3">
+            <DollarSign className="w-4 h-4 text-amber-500" />
+            <span className="text-2xl font-bold text-navy-900 dark:text-white">{formatCurrency(project.totalCost)}</span>
+          </div>
+        )}
         
-        <p className="text-sm text-navy-600 dark:text-navy-300 mb-4 line-clamp-2">{project.description}</p>
+        {project.description && (
+          <p className="text-sm text-navy-600 dark:text-navy-300 mb-4 line-clamp-2">{project.description}</p>
+        )}
         
         {/* Locked/Unlocked content */}
         {project.isUnlocked ? (
@@ -353,10 +452,37 @@ function ProjectCard({ project, onUnlock, onView }: ProjectCardProps) {
 interface UnlockModalProps {
   project: ProjectLead | null;
   onClose: () => void;
-  onConfirm: (project: ProjectLead) => void;
 }
 
-function UnlockModal({ project, onClose, onConfirm }: UnlockModalProps) {
+function UnlockModal({ project, onClose }: UnlockModalProps) {
+  const [unlockEmail, setUnlockEmail] = useState('');
+  const [isUnlocking, setIsUnlocking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConfirmUnlock = async () => {
+    if (!project || !unlockEmail.trim()) {
+      setError('Please enter your email address');
+      return;
+    }
+
+    setIsUnlocking(true);
+    setError(null);
+
+    try {
+      const response = await api.initiateUnlock(project.id, unlockEmail);
+      // Redirect to Stripe checkout
+      if (response.checkout_url) {
+        window.location.href = response.checkout_url;
+      } else {
+        setError('Failed to initiate payment. Please try again.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unlock project');
+    } finally {
+      setIsUnlocking(false);
+    }
+  };
+
   if (!project) return null;
   
   return (
@@ -388,10 +514,14 @@ function UnlockModal({ project, onClose, onConfirm }: UnlockModalProps) {
         <div className="p-6">
           {/* Project Summary */}
           <div className="bg-navy-50 dark:bg-navy-900/50 rounded-xl p-4 mb-6">
-            <h3 className="font-semibold text-navy-900 dark:text-white mb-2">{project.title}</h3>
+            <h3 className="font-semibold text-navy-900 dark:text-white mb-2">{project.projectType || 'Project'}</h3>
             <div className="flex items-center gap-4 text-sm text-navy-600 dark:text-navy-400">
-              <span className="flex items-center gap-1"><MapPin className="w-4 h-4" />{project.zipCode}</span>
-              <span className="flex items-center gap-1"><DollarSign className="w-4 h-4" />{formatCurrency(project.totalCost)}</span>
+              {project.zipCode && (
+                <span className="flex items-center gap-1"><MapPin className="w-4 h-4" />{project.zipCode}</span>
+              )}
+              {project.totalCost && (
+                <span className="flex items-center gap-1"><DollarSign className="w-4 h-4" />{formatCurrency(project.totalCost)}</span>
+              )}
             </div>
           </div>
           
@@ -421,20 +551,59 @@ function UnlockModal({ project, onClose, onConfirm }: UnlockModalProps) {
             <p className="text-xs text-navy-500 dark:text-navy-400 mt-1">One-time payment, full access forever</p>
           </div>
           
+          {/* Email Input */}
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-navy-700 dark:text-navy-300 mb-2">
+              Your Email Address
+            </label>
+            <input
+              type="email"
+              value={unlockEmail}
+              onChange={(e) => setUnlockEmail(e.target.value)}
+              placeholder="contractor@email.com"
+              disabled={isUnlocking}
+              className="w-full px-4 py-3 bg-navy-50 dark:bg-navy-900 border border-navy-200 dark:border-navy-700 rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isUnlocking && unlockEmail.trim()) {
+                  handleConfirmUnlock();
+                }
+              }}
+            />
+            <p className="text-xs text-navy-500 dark:text-navy-400 mt-1">
+              We'll send your unlock code to this email after payment
+            </p>
+          </div>
+
+          {/* Error Message */}
+          {error && (
+            <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl">
+              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+            </div>
+          )}
+
           {/* Action buttons */}
           <div className="flex gap-3">
             <button
               onClick={onClose}
-              className="flex-1 py-3 px-4 bg-navy-100 dark:bg-navy-700 text-navy-700 dark:text-navy-200 font-medium rounded-xl hover:bg-navy-200 dark:hover:bg-navy-600 transition-colors"
+              disabled={isUnlocking}
+              className="flex-1 py-3 px-4 bg-navy-100 dark:bg-navy-700 text-navy-700 dark:text-navy-200 font-medium rounded-xl hover:bg-navy-200 dark:hover:bg-navy-600 transition-colors disabled:opacity-50"
             >
               Cancel
             </button>
             <motion.button
-              onClick={() => onConfirm(project)}
+              onClick={handleConfirmUnlock}
+              disabled={isUnlocking || !unlockEmail.trim()}
               whileTap={{ scale: 0.98 }}
-              className="flex-1 py-3 px-4 bg-gradient-to-r from-amber-500 to-amber-400 text-navy-900 font-semibold rounded-xl shadow-lg shadow-amber-500/25"
+              className="flex-1 py-3 px-4 bg-gradient-to-r from-amber-500 to-amber-400 text-navy-900 font-semibold rounded-xl shadow-lg shadow-amber-500/25 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              Confirm & Pay
+              {isUnlocking ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Processing...
+                </>
+              ) : (
+                'Confirm & Pay'
+              )}
             </motion.button>
           </div>
         </div>
@@ -471,7 +640,7 @@ function ViewModal({ project, onClose }: ViewModalProps) {
       >
         {/* Header */}
         <div className="sticky top-0 bg-white dark:bg-navy-800 border-b border-navy-100 dark:border-navy-700 px-6 py-4 flex items-center justify-between z-10">
-          <h2 className="text-xl font-bold text-navy-900 dark:text-white">{project.title}</h2>
+          <h2 className="text-xl font-bold text-navy-900 dark:text-white">{project.projectType || 'Project'}</h2>
           <button onClick={onClose} className="p-2 hover:bg-navy-100 dark:hover:bg-navy-700 rounded-lg transition-colors">
             <X className="w-5 h-5 text-navy-500" />
           </button>
@@ -479,14 +648,6 @@ function ViewModal({ project, onClose }: ViewModalProps) {
         
         {/* Content */}
         <div className="p-6 space-y-6">
-          {/* Images */}
-          {project.thumbnails.length > 0 && (
-            <div className="flex gap-2 overflow-x-auto pb-2">
-              {project.thumbnails.map((thumb, idx) => (
-                <img key={idx} src={thumb} alt={`Project ${idx + 1}`} className="h-40 rounded-xl object-cover flex-shrink-0" />
-              ))}
-            </div>
-          )}
           
           {/* Project Info */}
           <div className="grid sm:grid-cols-2 gap-4">
@@ -503,8 +664,8 @@ function ViewModal({ project, onClose }: ViewModalProps) {
               <p className="font-medium text-navy-900 dark:text-white">{project.zipCode}</p>
             </div>
             <div className="bg-navy-50 dark:bg-navy-900/50 rounded-xl p-4">
-              <h4 className="text-sm font-medium text-navy-500 dark:text-navy-400 mb-1">Timeline</h4>
-              <p className="font-medium text-navy-900 dark:text-white">{project.details?.timeline || 'TBD'}</p>
+              <h4 className="text-sm font-medium text-navy-500 dark:text-navy-400 mb-1">Created</h4>
+              <p className="font-medium text-navy-900 dark:text-white">{formatTimeAgo(project.createdAt)}</p>
             </div>
           </div>
           
@@ -514,25 +675,11 @@ function ViewModal({ project, onClose }: ViewModalProps) {
             <p className="text-navy-600 dark:text-navy-300">{project.description}</p>
           </div>
           
-          {/* Materials */}
-          {project.details?.materials && (
+          {/* Description */}
+          {project.description && (
             <div>
-              <h4 className="font-medium text-navy-900 dark:text-white mb-2">Materials & Specifications</h4>
-              <div className="flex flex-wrap gap-2">
-                {project.details.materials.map((material, idx) => (
-                  <span key={idx} className="px-3 py-1.5 bg-navy-100 dark:bg-navy-700 text-navy-700 dark:text-navy-300 text-sm rounded-lg">
-                    {material}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-          
-          {/* Notes */}
-          {project.details?.notes && (
-            <div>
-              <h4 className="font-medium text-navy-900 dark:text-white mb-2">Additional Notes</h4>
-              <p className="text-navy-600 dark:text-navy-300 text-sm">{project.details.notes}</p>
+              <h4 className="font-medium text-navy-900 dark:text-white mb-2">Description</h4>
+              <p className="text-navy-600 dark:text-navy-300">{project.description}</p>
             </div>
           )}
           
@@ -563,43 +710,6 @@ function ViewModal({ project, onClose }: ViewModalProps) {
   );
 }
 
-// ==================== MAIN COMPONENT ====================
-export default function MarketplacePage() {
-  const [projects, setProjects] = useState<ProjectLead[]>(MOCK_PROJECTS);
-  const [searchZip, setSearchZip] = useState('');
-  const [selectedType, setSelectedType] = useState('All Project Types');
-  const [unlockingProject, setUnlockingProject] = useState<ProjectLead | null>(null);
-  const [viewingProject, setViewingProject] = useState<ProjectLead | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  
-  const filteredProjects = useMemo(() => {
-    return projects.filter(p => {
-      const matchesZip = !searchZip || p.zipCode.includes(searchZip);
-      const matchesType = selectedType === 'All Project Types' || p.projectType === selectedType;
-      return matchesZip && matchesType;
-    });
-  }, [projects, searchZip, selectedType]);
-  
-  const activeLeads = projects.filter(p => !p.isUnlocked).length;
-  
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    setTimeout(() => setIsRefreshing(false), 1000);
-  };
-  
-  const handleUnlock = (project: ProjectLead) => {
-    setUnlockingProject(project);
-  };
-  
-  const handleConfirmUnlock = (project: ProjectLead) => {
-    setProjects(prev => prev.map(p => p.id === project.id ? { ...p, isUnlocked: true } : p));
-    setUnlockingProject(null);
-  };
-  
-  const handleView = (project: ProjectLead) => {
-    setViewingProject(project);
-  };
-  
   return (
     <div className="min-h-screen bg-gradient-to-b from-navy-50 to-white dark:from-navy-950 dark:to-navy-900 pt-20 md:pt-24">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -662,8 +772,20 @@ export default function MarketplacePage() {
           </div>
         </div>
         
+        {/* Error Message */}
+        {error && (
+          <div className="mb-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl">
+            <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+          </div>
+        )}
+
         {/* Projects Grid */}
-        {filteredProjects.length === 0 ? (
+        {isLoading ? (
+          <div className="text-center py-16">
+            <Loader2 className="w-12 h-12 text-amber-500 animate-spin mx-auto mb-4" />
+            <p className="text-navy-600 dark:text-navy-400">Loading projects...</p>
+          </div>
+        ) : filteredProjects.length === 0 ? (
           <div className="text-center py-16">
             <Home className="w-16 h-16 text-navy-300 dark:text-navy-600 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-navy-900 dark:text-white mb-2">No projects found</h3>
@@ -708,7 +830,7 @@ export default function MarketplacePage() {
       {/* Modals */}
       <AnimatePresence>
         {unlockingProject && (
-          <UnlockModal project={unlockingProject} onClose={() => setUnlockingProject(null)} onConfirm={handleConfirmUnlock} />
+          <UnlockModal project={unlockingProject} onClose={() => setUnlockingProject(null)} />
         )}
         {viewingProject && (
           <ViewModal project={viewingProject} onClose={() => setViewingProject(null)} />

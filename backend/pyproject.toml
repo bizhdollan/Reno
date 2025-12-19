@@ -8,4 +8,11 @@ dependencies = [
     "litellm>=1.80.9",
     "langgraph>=1.0.4",
     "python-multipart>=0.0.20",
+    "sqlalchemy>=2.0.45",
+    "psycopg2-binary>=2.9.11",
+    "alembic>=1.17.2",
+    "python-dotenv>=1.2.1",
+    "stripe>=14.1.0",
+    "resend>=2.19.0",
+    "requests>=2.31.0",
 ]

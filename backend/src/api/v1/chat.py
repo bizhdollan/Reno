@@ -2,18 +2,19 @@
 
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from src.core.langgraph import create_initial_state, run_conversation
 from src.core.langgraph.graph import get_message_content
 from src.core.langgraph.state import ProjectState
+from src.db.database import get_db
+from src.db.models import Project, ConversationState
+from src.utils.token_generator import generate_token
 
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
-
-# Simple in-memory store keyed by project_id
-_STATE_STORE: Dict[str, ProjectState] = {}
 
 
 class ChatMessage(BaseModel):
@@ -36,26 +37,62 @@ class ChatResponse(BaseModel):
     # Assistant reply can be plain text or structured content (e.g., tier cards)
     assistant: Any = Field(..., description="Assistant reply (text or structured content)")
     state: ProjectState = Field(..., description="Updated project state after this turn")
+    project_id: str = Field(..., description="Canonical project token (PRJ-XXXXXX)")
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(payload: ChatMessage) -> ChatResponse:
+async def chat(
+    payload: ChatMessage,
+    db: Session = Depends(get_db)
+) -> ChatResponse:
     """
     Run a single synchronous chat turn against the LangGraph flow.
 
-    - Uses `project_id` as the LangGraph thread id.
+    - Uses `project_id` as the project token (PRJ-XXXXXX).
     - Accepts text or multimodal messages (string or list of message parts).
-    - Persists state in memory per project_id for now; frontend can also pass state explicitly.
+    - Persists state in PostgreSQL database for durability.
+    - Creates new project if project_id doesn't exist or is "new".
     """
     project_id = payload.project_id
-
-    # Resolve starting state: client-provided > cached > fresh
-    state = payload.state or _STATE_STORE.get(project_id) or create_initial_state()
+    
+    # Handle new project creation
+    if not project_id or project_id == "new":
+        # Generate new project token
+        project_id = generate_token("PRJ")
+        print(f"[chat] Creating new project with token: {project_id}")
+    
+    # Load or create project in database
+    project = db.query(Project).filter(Project.token == project_id).first()
+    
+    if not project:
+        # Create new project
+        project = Project(
+            token=project_id,
+            status="draft"
+        )
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        print(f"[chat] Created new project in database: {project.id}")
+    
+    # Load conversation state from database
+    conv_state = db.query(ConversationState).filter(
+        ConversationState.project_id == project.id
+    ).first()
+    
+    # Resolve starting state: client-provided > database > fresh
+    if payload.state:
+        state = payload.state
+    elif conv_state:
+        state = conv_state.state
+    else:
+        state = create_initial_state()
 
     print(
-        f"[chat] incoming project_id={project_id} | "
+        f"[chat] incoming project_id={project_id} (db_id={project.id}) | "
         f"message_type={'list' if isinstance(payload.message, list) else 'str'} | "
-        f"state_current_stage={state.get('current_stage')}"
+        f"state_current_stage={state.get('current_stage')} | "
+        f"state_source={'client' if payload.state else 'database' if conv_state else 'fresh'}"
     )
     # Log raw user input for debugging
     print(f"[chat] user_input={payload.message!r}")
@@ -92,8 +129,52 @@ async def chat(payload: ChatMessage) -> ChatResponse:
     # Log assistant reply for debugging
     print(f"[chat] assistant_reply={assistant_reply!r}")
 
-    # Cache state for subsequent turns
-    _STATE_STORE[project_id] = serializable_state
+    # Save state to database
+    if conv_state:
+        # Update existing state
+        conv_state.state = serializable_state
+        print(f"[chat] Updated conversation state in database")
+    else:
+        # Create new state
+        conv_state = ConversationState(
+            project_id=project.id,
+            state=serializable_state
+        )
+        db.add(conv_state)
+        print(f"[chat] Created conversation state in database")
+    
+    # Update project fields from state if available
+    if serializable_state.get('project_type'):
+        project.project_type = serializable_state['project_type']
+    if serializable_state.get('zip_code'):
+        project.zip_code = serializable_state['zip_code']
+    if serializable_state.get('cost_tiers') and serializable_state.get('selected_tier'):
+        # Extract selected tier info
+        selected_tier = serializable_state.get('selected_tier')
+        tiers = serializable_state.get('cost_tiers', [])
+        for tier in tiers:
+            if tier.get('id') == selected_tier:
+                project.accepted_tier = selected_tier
+                project.total_price = tier.get('total_cost', 0)
+                break
+    
+    # Update project status based on conversation stage
+    current_stage = serializable_state.get('current_stage')
+    if current_stage == 'completed':
+        project.status = 'completed'
+    elif project.status == 'draft':
+        # Keep as draft until conversation completes
+        project.status = 'draft'
+    
+    # Attach project_id/token to state for frontend convenience
+    serializable_state["project_id"] = project_id
 
-    return ChatResponse(assistant=assistant_reply, state=serializable_state)
+    db.commit()
+    print(f"[chat] Saved to database: project_status={project.status}")
+
+    return ChatResponse(
+        assistant=assistant_reply,
+        state=serializable_state,
+        project_id=project_id,
+    )
 

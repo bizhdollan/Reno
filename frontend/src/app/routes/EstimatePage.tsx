@@ -4,10 +4,11 @@ import remarkGfm from "remark-gfm";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   Send, X, Paperclip, Check, ChevronDown, ChevronUp, Camera, SwitchCamera,
-  Bot, User, Sparkles, CheckCircle2, Circle, Play, RotateCcw, Film
+  Bot, User, Sparkles, CheckCircle2, Circle, Play, RotateCcw, Film, Mail, Copy, CheckCircle
 } from "lucide-react";
 import rehypeRaw from "rehype-raw";
 import ImageLightbox from "../../components/shared/ImageLightBox";
+import { api } from "../../lib/api";
 
 // ==================== TYPES ====================
 interface Message {
@@ -1281,7 +1282,7 @@ const MessageBubble = memo(function MessageBubble({ message, onSelectTier, onIma
 
 // ==================== MAIN COMPONENT ====================
 export default function EstimatePage() {
-  const projectId = useMemo(() => crypto.randomUUID(), []);
+  const [projectId, setProjectId] = useState<string>("new");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [pendingFiles, setPendingFiles] = useState<UploadedFile[]>([]);
@@ -1290,6 +1291,11 @@ export default function EstimatePage() {
   const [error, setError] = useState<string | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [saveEmail, setSaveEmail] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [savedToken, setSavedToken] = useState<string | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1300,19 +1306,39 @@ export default function EstimatePage() {
   useEffect(() => { if (!isSending && messages.length > 0) { const timer = setTimeout(() => textareaRef.current?.focus(), 50); return () => clearTimeout(timer); } }, [isSending, messages.length]);
   useEffect(() => { return () => { pendingFiles.forEach((f) => URL.revokeObjectURL(f.preview)); }; }, []);
 
+  // Initialize chat only once on mount
   useEffect(() => {
+    let isMounted = true;
     const start = async () => {
       setIsSending(true);
       try {
         const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: "", state: null }) });
         if (!res.ok) throw new Error("Failed to start");
-        const data = await res.json();
+        const data: any = await res.json();
+        if (!isMounted) return; // Prevent state updates if component unmounted
+        // Use backend-provided project_id (PRJ-XXXXXX) for subsequent requests
+        if (data.project_id && data.project_id !== projectId) {
+          setProjectId(data.project_id);
+        } else if (data.state?.project_id && data.state.project_id !== projectId) {
+          setProjectId(data.state.project_id);
+        }
         setProjectState(data.state);
         setMessages([{ role: "assistant", content: data.assistant, timestamp: new Date().toISOString() }]);
-      } catch { setError("Failed to connect. Please refresh."); } finally { setIsSending(false); }
+      } catch { 
+        if (isMounted) {
+          setError("Failed to connect. Please refresh.");
+        }
+      } finally { 
+        if (isMounted) {
+          setIsSending(false);
+        }
+      }
     };
     start();
-  }, [projectId]);
+    return () => {
+      isMounted = false;
+    };
+  }, []); // Empty dependency array - only run once on mount
 
   // Add file to upload with video support
   const addFileToUpload = useCallback(async (file: File, thumbnail?: string, duration?: number) => {
@@ -1434,7 +1460,12 @@ export default function EstimatePage() {
     try {
       const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: messageContent, state: projectState }) });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data: any = await res.json();
+      if (data.project_id) {
+        setProjectId(data.project_id);
+      } else if (data.state?.project_id) {
+        setProjectId(data.state.project_id);
+      }
       setProjectState(data.state);
       setMessages((prev) => [...prev, { role: "assistant", content: data.assistant || "(no response)", timestamp: new Date().toISOString() }]);
     } catch (err) { setError(err instanceof Error ? err.message : "Something went wrong"); } finally { setIsSending(false); }
@@ -1446,6 +1477,41 @@ export default function EstimatePage() {
   const isCompleted = projectState?.current_stage === "completed";
   const hasUploadingFiles = pendingFiles.some((f) => f.uploading);
   const hasUploadedFiles = pendingFiles.some((f) => f.uploaded);
+
+  // Show save modal when completed
+  useEffect(() => {
+    if (isCompleted && !savedToken && !showSaveModal) {
+      setShowSaveModal(true);
+    }
+  }, [isCompleted, savedToken, showSaveModal]);
+
+  const handleSaveProject = useCallback(async () => {
+    if (!saveEmail.trim()) {
+      setError("Please enter your email address");
+      return;
+    }
+    
+    setIsSaving(true);
+    setError(null);
+    
+    try {
+      const response: any = await api.saveProject(saveEmail, projectId);
+      setSavedToken(response.token);
+      setShowSaveModal(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save project");
+    } finally {
+      setIsSaving(false);
+    }
+  }, [saveEmail]);
+
+  const handleCopyToken = useCallback(() => {
+    if (savedToken) {
+      navigator.clipboard.writeText(savedToken);
+      setTokenCopied(true);
+      setTimeout(() => setTokenCopied(false), 2000);
+    }
+  }, [savedToken]);
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-navy-50 to-white dark:from-navy-950 dark:to-navy-900">
@@ -1527,13 +1593,125 @@ export default function EstimatePage() {
       {isCompleted && (
         <motion.footer initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="flex-shrink-0 border-t border-emerald-200 dark:border-emerald-800 bg-gradient-to-r from-emerald-50 to-emerald-100 dark:from-emerald-900/20 dark:to-emerald-800/20 py-6">
           <div className="max-w-4xl mx-auto px-4 text-center">
-            <div className="flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-400 font-medium">
-              <CheckCircle2 className="w-5 h-5" />
-              <span>Your renovation estimate is complete!</span>
-            </div>
+            {savedToken ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-400 font-medium">
+                  <CheckCircle2 className="w-5 h-5" />
+                  <span>Project saved! Your token has been sent to your email.</span>
+                </div>
+                <div className="bg-white dark:bg-navy-800 rounded-xl p-4 border border-emerald-200 dark:border-emerald-700">
+                  <p className="text-sm text-navy-600 dark:text-navy-400 mb-2">Your Project Token:</p>
+                  <div className="flex items-center justify-center gap-2">
+                    <code className="text-lg font-mono font-bold text-navy-900 dark:text-white bg-navy-50 dark:bg-navy-900 px-4 py-2 rounded-lg">
+                      {savedToken}
+                    </code>
+                    <motion.button
+                      onClick={handleCopyToken}
+                      whileTap={{ scale: 0.95 }}
+                      className="p-2 bg-navy-100 dark:bg-navy-700 hover:bg-navy-200 dark:hover:bg-navy-600 rounded-lg transition-colors"
+                      title="Copy token"
+                    >
+                      {tokenCopied ? (
+                        <CheckCircle className="w-5 h-5 text-emerald-600" />
+                      ) : (
+                        <Copy className="w-5 h-5 text-navy-600 dark:text-navy-300" />
+                      )}
+                    </motion.button>
+                  </div>
+                  <p className="text-xs text-navy-500 dark:text-navy-400 mt-2">Save this token to access your project later</p>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-400 font-medium">
+                <CheckCircle2 className="w-5 h-5" />
+                <span>Your renovation estimate is complete!</span>
+              </div>
+            )}
           </div>
         </motion.footer>
       )}
+
+      {/* Save Project Modal */}
+      <AnimatePresence>
+        {showSaveModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            onClick={() => !isSaving && setShowSaveModal(false)}
+          >
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={(e) => e.stopPropagation()}
+              className="relative bg-white dark:bg-navy-800 rounded-2xl shadow-2xl max-w-md w-full"
+            >
+              <div className="p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold text-navy-900 dark:text-white">Save Your Project</h2>
+                  {!isSaving && (
+                    <button
+                      onClick={() => setShowSaveModal(false)}
+                      className="p-2 hover:bg-navy-100 dark:hover:bg-navy-700 rounded-lg transition-colors"
+                    >
+                      <X className="w-5 h-5 text-navy-500" />
+                    </button>
+                  )}
+                </div>
+                
+                <p className="text-sm text-navy-600 dark:text-navy-400 mb-4">
+                  Enter your email to receive your project token. You'll need this token to access your project later.
+                </p>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-navy-700 dark:text-navy-300 mb-2">
+                      Email Address
+                    </label>
+                    <div className="relative">
+                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
+                      <input
+                        type="email"
+                        value={saveEmail}
+                        onChange={(e) => setSaveEmail(e.target.value)}
+                        placeholder="your@email.com"
+                        disabled={isSaving}
+                        className="w-full pl-10 pr-4 py-3 bg-navy-50 dark:bg-navy-900 border border-navy-200 dark:border-navy-700 rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !isSaving) {
+                            handleSaveProject();
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                  
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => setShowSaveModal(false)}
+                      disabled={isSaving}
+                      className="flex-1 py-3 px-4 bg-navy-100 dark:bg-navy-700 text-navy-700 dark:text-navy-200 font-medium rounded-xl hover:bg-navy-200 dark:hover:bg-navy-600 transition-colors disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <motion.button
+                      onClick={handleSaveProject}
+                      disabled={isSaving || !saveEmail.trim()}
+                      whileTap={{ scale: 0.98 }}
+                      className="flex-1 py-3 px-4 bg-gradient-to-r from-amber-500 to-amber-400 text-navy-900 font-semibold rounded-xl shadow-lg shadow-amber-500/25 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isSaving ? "Saving..." : "Save Project"}
+                    </motion.button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Camera Modal */}
       <AnimatePresence>{isCameraOpen && <CameraModal isOpen={isCameraOpen} onClose={() => setIsCameraOpen(false)} onCapture={handleCameraCapture} />}</AnimatePresence>
