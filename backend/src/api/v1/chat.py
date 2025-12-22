@@ -38,6 +38,62 @@ class ChatResponse(BaseModel):
     assistant: Any = Field(..., description="Assistant reply (text or structured content)")
     state: ProjectState = Field(..., description="Updated project state after this turn")
     project_id: str = Field(..., description="Canonical project token (PRJ-XXXXXX)")
+    internal_id: str = Field(..., description="Internal project UUID for draft tracking")
+
+
+@router.get("/conversation/{id_or_token}")
+async def get_conversation_state(
+    id_or_token: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieve conversation state by project UUID or PRJ- token.
+
+    Used for resuming conversations after page refresh.
+    Accepts either internal UUID or PRJ- token.
+
+    Args:
+        id_or_token: Project UUID or PRJ- token
+        db: Database session
+
+    Returns:
+        Full conversation state or null if not found
+    """
+    project = None
+
+    # Check if it's a PRJ- token or UUID
+    if id_or_token.startswith("PRJ-"):
+        # Look up by token
+        project = db.query(Project).filter(Project.token == id_or_token).first()
+    else:
+        # Assume it's a UUID
+        try:
+            from uuid import UUID
+            uuid_obj = UUID(id_or_token)
+            project = db.query(Project).filter(Project.id == uuid_obj).first()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid project ID or token format")
+
+    if not project:
+        return {"state": None, "project_id": None}
+
+    # Get conversation state
+    conv_state = db.query(ConversationState).filter(
+        ConversationState.project_id == project.id
+    ).first()
+
+    if not conv_state:
+        return {"state": None, "project_id": project.token}
+
+    # Return state with project token
+    state_dict = dict(conv_state.state)
+    state_dict["project_id"] = project.token
+
+    return {
+        "state": state_dict,
+        "project_id": project.token,
+        "internal_id": str(project.id)
+    }
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -80,10 +136,9 @@ async def chat(
         ConversationState.project_id == project.id
     ).first()
     
-    # Resolve starting state: client-provided > database > fresh
-    if payload.state:
-        state = payload.state
-    elif conv_state:
+    # Resolve starting state: database > fresh
+    # Ignore any client-provided state to prevent duplication/drift.
+    if conv_state:
         state = conv_state.state
     else:
         state = create_initial_state()
@@ -92,7 +147,7 @@ async def chat(
         f"[chat] incoming project_id={project_id} (db_id={project.id}) | "
         f"message_type={'list' if isinstance(payload.message, list) else 'str'} | "
         f"state_current_stage={state.get('current_stage')} | "
-        f"state_source={'client' if payload.state else 'database' if conv_state else 'fresh'}"
+        f"state_source={'database' if conv_state else 'fresh'}"
     )
     # Log raw user input for debugging
     print(f"[chat] user_input={payload.message!r}")
@@ -148,6 +203,31 @@ async def chat(
         project.project_type = serializable_state['project_type']
     if serializable_state.get('zip_code'):
         project.zip_code = serializable_state['zip_code']
+
+    # Sync JSONB fields from conversation state
+    if serializable_state.get('image_analyses'):
+        project.images = serializable_state['image_analyses']
+
+    if serializable_state.get('extracted_data'):
+        project.extracted_data = serializable_state['extracted_data']
+
+    if serializable_state.get('renovation_vision'):
+        project.renovation_vision = serializable_state['renovation_vision']
+
+    # Sync full estimate with all 3 tiers
+    if serializable_state.get('cost_tiers'):
+        tiers = serializable_state.get('cost_tiers', [])
+        # Convert tiers list to dict format for full_estimate JSONB
+        full_estimate_dict = {}
+        for tier in tiers:
+            tier_id = tier.get('id', '').lower()  # 'low', 'mid', 'high'
+            if tier_id in ['low', 'mid', 'high']:
+                full_estimate_dict[tier_id] = tier
+
+        if full_estimate_dict:
+            project.full_estimate = full_estimate_dict
+
+    # Update selected tier and total price
     if serializable_state.get('cost_tiers') and serializable_state.get('selected_tier'):
         # Extract selected tier info
         selected_tier = serializable_state.get('selected_tier')
@@ -157,7 +237,22 @@ async def chat(
                 project.accepted_tier = selected_tier
                 project.total_price = tier.get('total_cost', 0)
                 break
-    
+
+    # Generate brief scope for marketplace preview (first 200 chars of description)
+    if serializable_state.get('extracted_data'):
+        extracted = serializable_state['extracted_data']
+        # Try to create a brief description from extracted data
+        brief_parts = []
+        if extracted.get('project_description'):
+            brief_parts.append(extracted['project_description'])
+        elif extracted.get('materials'):
+            materials = extracted['materials']
+            if isinstance(materials, list) and materials:
+                brief_parts.append(f"Project includes: {', '.join(str(m) for m in materials[:3])}")
+
+        if brief_parts:
+            project.brief_scope = ' '.join(brief_parts)[:200]
+
     # Update project status based on conversation stage
     current_stage = serializable_state.get('current_stage')
     if current_stage == 'completed':
@@ -176,5 +271,5 @@ async def chat(
         assistant=assistant_reply,
         state=serializable_state,
         project_id=project_id,
+        internal_id=str(project.id),
     )
-

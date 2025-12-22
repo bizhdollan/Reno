@@ -181,5 +181,52 @@ async def publish_project(
     
     db.commit()
     db.refresh(project)
-    
+
+    return ProjectResponse.model_validate(project)
+
+
+@router.post("/{token}/complete", response_model=ProjectResponse)
+async def mark_project_complete_homeowner(
+    token: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Mark project as complete from homeowner side.
+
+    Project is fully completed only when BOTH homeowner AND contractor mark it.
+    This is a two-party completion system to ensure mutual agreement.
+
+    Args:
+        token: Project token (PRJ-XXXXXX)
+        db: Database session
+
+    Returns:
+        Updated project with completion status
+    """
+    project = db.query(Project).filter(Project.token == token).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Check if project is in unlocked state
+    if project.status != "unlocked":
+        raise HTTPException(
+            status_code=400,
+            detail="Project must be unlocked before marking complete"
+        )
+
+    # Mark homeowner as complete
+    project.homeowner_marked_complete = True
+
+    # If contractor also marked complete, finalize completion
+    if project.contractor_marked_complete:
+        from datetime import datetime, UTC
+        project.status = "completed"
+        project.completed_at = datetime.now(UTC)
+        print(f"[complete] Project {token} fully completed by both parties")
+    else:
+        print(f"[complete] Homeowner marked complete for {token}, waiting for contractor")
+
+    db.commit()
+    db.refresh(project)
+
     return ProjectResponse.model_validate(project)

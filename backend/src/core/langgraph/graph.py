@@ -38,7 +38,7 @@ def should_continue(state: ProjectState) -> str:
     return "end"
 
 
-def create_graph(checkpointer=None):
+def create_graph(checkpointer: str | None = None):
     """
     Create the renovation estimation graph.
     
@@ -119,9 +119,10 @@ def create_graph(checkpointer=None):
     # cost_estimation always waits for user (to select tier)
     builder.add_edge("cost_estimation", END)
     
-    # Use provided checkpointer or default to memory
-    if checkpointer is None:
+    if checkpointer == "memory":
         checkpointer = MemorySaver()
+    elif checkpointer is None:
+        checkpointer = None
     
     return builder.compile(checkpointer=checkpointer)
 

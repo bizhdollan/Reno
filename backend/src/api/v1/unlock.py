@@ -240,6 +240,65 @@ async def get_unlock(
     return UnlockResponse(**unlock_dict)
 
 
+@router.post("/{unlock_token}/complete", response_model=UnlockResponse)
+async def mark_project_complete_contractor(
+    unlock_token: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Mark project as complete from contractor side.
+
+    Project is fully completed only when BOTH homeowner AND contractor mark it.
+    This is a two-party completion system to ensure mutual agreement.
+
+    Args:
+        unlock_token: Unlock token (UNL-XXXXXX)
+        db: Database session
+
+    Returns:
+        Updated unlock with project completion status
+    """
+    unlock = db.query(Unlock).filter(Unlock.unlock_token == unlock_token).first()
+    if not unlock:
+        raise HTTPException(status_code=404, detail="Unlock not found")
+
+    # Get project
+    project = db.query(Project).filter(Project.id == unlock.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Check if project is in unlocked state
+    if project.status != "unlocked":
+        raise HTTPException(
+            status_code=400,
+            detail="Project must be unlocked before marking complete"
+        )
+
+    # Mark contractor as complete
+    project.contractor_marked_complete = True
+
+    # If homeowner also marked complete, finalize completion
+    if project.homeowner_marked_complete:
+        from datetime import datetime, UTC
+        project.status = "completed"
+        project.completed_at = datetime.now(UTC)
+        print(f"[complete] Project {project.token} fully completed by both parties")
+    else:
+        print(f"[complete] Contractor marked complete for {project.token}, waiting for homeowner")
+
+    db.commit()
+    db.refresh(project)
+    db.refresh(unlock)
+
+    # Create response with updated project
+    unlock_dict = {
+        **UnlockResponse.model_validate(unlock).model_dump(),
+        "project": ProjectResponse.model_validate(project) if project else None
+    }
+
+    return UnlockResponse(**unlock_dict)
+
+
 @router.post("/webhooks/stripe")
 async def stripe_webhook(
     request: Request,
@@ -325,7 +384,8 @@ async def stripe_webhook(
                     homeowner_email=project.homeowner_email or "",
                     homeowner_phone=project.homeowner_phone or ""
                 )
-                
+                unlock.contractor_email_sent = True
+
                 # Email to homeowner
                 if project.homeowner_email:
                     email_service.send_homeowner_project_unlocked(
@@ -334,9 +394,11 @@ async def stripe_webhook(
                         project_type=project.project_type or "Renovation",
                         total_price=float(project.total_price) if project.total_price else 0.0
                     )
-                
+                    unlock.homeowner_notified = True
+
+                db.commit()
                 print(f"✅ Emails sent for {unlock_token}")
-            
+
             except Exception as e:
                 # Don't fail webhook if emails fail
                 print(f"⚠️ Email failed but payment processed: {e}")

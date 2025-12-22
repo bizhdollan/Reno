@@ -9,6 +9,8 @@ import {
 import rehypeRaw from "rehype-raw";
 import ImageLightbox from "../../components/shared/ImageLightBox";
 import { api } from "../../lib/api";
+import { storage } from "../../lib/storage";
+import { TokenPopup } from "../../components/TokenPopup";
 
 // ==================== TYPES ====================
 interface Message {
@@ -56,6 +58,13 @@ interface ProjectState {
   [key: string]: any;
 }
 
+interface InitResult {
+  projectId: string;
+  projectState: ProjectState | null;
+  messages: Message[];
+  savedToken: string | null;
+}
+
 interface UploadedFile {
   file: File;
   preview: string;
@@ -86,6 +95,8 @@ const STAGES = [
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
 const MAX_VIDEO_SIZE = 25 * 1024 * 1024; // 25MB
 
+let initInFlight: Promise<InitResult> | null = null;
+
 // ==================== UTILITIES ====================
 function formatCurrency(amount: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(amount);
@@ -111,6 +122,77 @@ async function uploadFile(file: File): Promise<FileUploadResponse> {
   const response = await fetch(`${API_BASE}/upload`, { method: "POST", body: formData });
   if (!response.ok) throw new Error(await response.text() || "Upload failed");
   return response.json();
+}
+
+async function initializeChat(): Promise<InitResult> {
+  // Check if user has previous session in localStorage
+  const savedProjectId = storage.getCurrentProjectId();
+
+  if (savedProjectId) {
+    // Try to restore previous session
+    try {
+      const response: any = await api.getConversationState(savedProjectId);
+
+      if (response.state && response.state.messages && response.state.messages.length > 0) {
+        // Rebuild messages from state - filter out empty messages
+        const restoredMessages: Message[] = response.state.messages
+          .filter((msg: any) => {
+            // Filter out empty user messages (initial empty message)
+            if (msg.role === 'user') {
+              if (typeof msg.content === 'string') {
+                return msg.content.trim().length > 0;
+              }
+              if (Array.isArray(msg.content)) {
+                return msg.content.length > 0;
+              }
+            }
+            // Keep all assistant messages
+            return true;
+          })
+          .map((msg: any) => ({
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp || new Date().toISOString()
+          }));
+
+        // Only restore if we have valid messages after filtering
+        if (restoredMessages.length > 0) {
+          const projectId = response.project_id || savedProjectId;
+          const savedToken = response.project_id?.startsWith('PRJ-') ? response.project_id : null;
+          return {
+            projectId,
+            projectState: response.state,
+            messages: restoredMessages,
+            savedToken
+          };
+        }
+
+        // No valid messages after filtering, clear and start fresh
+        storage.clearProject();
+      }
+    } catch (err) {
+      // Clear invalid data
+      storage.clearProject();
+    }
+  }
+
+  // Start fresh conversation
+  const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: "new", message: "", state: null }) });
+  if (!res.ok) throw new Error("Failed to start");
+  const data: any = await res.json();
+
+  // Store internal_id for draft tracking
+  if (data.internal_id) {
+    storage.setDraftProjectId(data.internal_id);
+  }
+
+  const welcomeMessage = { role: "assistant" as const, content: data.assistant, timestamp: new Date().toISOString() };
+  return {
+    projectId: data.project_id,
+    projectState: data.state,
+    messages: [welcomeMessage],
+    savedToken: null
+  };
 }
 
 // // Generate thumbnail from video blob - extract first frame
@@ -488,11 +570,7 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
         audio: false // DISABLED audio
       };
       
-      console.log('Requesting camera with constraints:', constraints);
-      
       const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-      
-      console.log('Got media stream:', mediaStream.getTracks().map(t => ({ kind: t.kind, label: t.label, enabled: t.enabled })));
       
       streamRef.current = mediaStream;
       
@@ -502,29 +580,23 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
         
         // Wait for video to be ready
         videoRef.current.onloadedmetadata = () => {
-          console.log('Video metadata loaded');
           videoRef.current?.play()
             .then(() => {
-              console.log('Video playing');
               setCameraReady(true);
             })
-            .catch(err => {
-              console.error('Video play error:', err);
+            .catch(() => {
               setError('Failed to start video preview');
             });
         };
       }
     } catch (err) {
-      console.error("Camera error:", err);
       setError(`Camera error: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
   }, []);
 
   const stopCamera = useCallback(() => {
-    console.log('Stopping camera');
     if (streamRef.current) { 
       streamRef.current.getTracks().forEach(track => {
-        console.log('Stopping track:', track.kind, track.label);
         track.stop();
       });
       streamRef.current = null;
@@ -538,7 +610,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
   // Start camera when modal opens
   useEffect(() => {
     if (isOpen && mode === 'camera') {
-      console.log('Modal opened, starting camera');
       startCamera(facingMode);
     }
     
@@ -583,9 +654,7 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
 
   // Capture photo
   const capturePhoto = useCallback(() => {
-    console.log('Capturing photo');
     if (!videoRef.current || !canvasRef.current) {
-      console.error('Video or canvas ref not available');
       return;
     }
     
@@ -594,7 +663,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
     
     // Make sure video has dimensions
     if (video.videoWidth === 0 || video.videoHeight === 0) {
-      console.error('Video has no dimensions');
       setError('Camera not ready. Please try again.');
       return;
     }
@@ -607,7 +675,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
       ctx.drawImage(video, 0, 0);
       canvas.toBlob((blob) => {
         if (blob) {
-          console.log('Photo captured, size:', blob.size);
           setCapturedBlob(blob);
           setCapturedThumbnail(canvas.toDataURL('image/jpeg', 0.8));
           setMode('photo-preview');
@@ -619,10 +686,7 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
 
   // Start video recording
   const startRecording = useCallback(() => {
-    console.log('Starting recording');
-    
     if (!streamRef.current) {
-      console.error('No stream available for recording');
       setError('Camera not ready for recording');
       return;
     }
@@ -642,44 +706,36 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
         mimeType = 'video/mp4';
       }
       
-      console.log('Using mime type:', mimeType);
-      
       const mediaRecorder = new MediaRecorder(streamRef.current, {
         mimeType,
         videoBitsPerSecond: 2500000
       });
       
       mediaRecorder.ondataavailable = (event) => {
-        console.log('Data available:', event.data.size);
         if (event.data.size > 0) {
           recordedChunksRef.current.push(event.data);
         }
       };
 
       mediaRecorder.onstop = async () => {
-        console.log('Recording stopped, chunks:', recordedChunksRef.current.length);
-        
         if (rafIdRef.current) {
           cancelAnimationFrame(rafIdRef.current);
           rafIdRef.current = null;
         }
         
         if (recordedChunksRef.current.length === 0) {
-          console.error('No recorded chunks');
           setError('Recording failed - no data captured');
           setIsRecording(false);
           return;
         }
         
         const blob = new Blob(recordedChunksRef.current, { type: mimeType });
-        console.log('Created blob, size:', blob.size);
         
         // Generate thumbnail
         try {
           const thumbnail = await generateVideoThumbnail(blob);
           setCapturedThumbnail(thumbnail);
         } catch (err) {
-          console.warn('Failed to generate thumbnail:', err);
           setCapturedThumbnail(null);
         }
         
@@ -693,7 +749,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
       };
 
       mediaRecorder.onerror = (event) => {
-        console.error('MediaRecorder error:', event);
         setError('Recording error occurred');
         setIsRecording(false);
       };
@@ -724,7 +779,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
         }
 
         if (elapsed >= MAX_RECORDING_TIME) {
-          console.log('Max recording time reached, stopping');
           if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
             mediaRecorderRef.current.stop();
           }
@@ -736,7 +790,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
       rafIdRef.current = requestAnimationFrame(updateProgress);
       
     } catch (err) {
-      console.error("Recording error:", err);
       setError(`Recording error: ${err instanceof Error ? err.message : 'Unknown'}`);
       setIsRecording(false);
     }
@@ -744,8 +797,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
 
   // Stop video recording
   const stopRecording = useCallback(() => {
-    console.log('stopRecording called, recorder state:', mediaRecorderRef.current?.state);
-    
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
     }
@@ -760,16 +811,12 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
     e.preventDefault();
     
     if (!cameraReady) {
-      console.log('Camera not ready, ignoring press');
       return;
     }
-    
-    console.log('Press start');
     isLongPressRef.current = false;
     
     // Start long-press timer
     longPressTimerRef.current = setTimeout(() => {
-      console.log('Long press threshold reached, starting recording');
       isLongPressRef.current = true;
       startRecording();
     }, LONG_PRESS_THRESHOLD);
@@ -779,8 +826,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
   const handlePressEnd = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault();
     
-    console.log('Press end, isRecording:', isRecording, 'isLongPress:', isLongPressRef.current);
-    
     // Clear the long press timer
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
@@ -789,11 +834,9 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
 
     if (isRecording) {
       // Was recording, stop it
-      console.log('Stopping recording');
       stopRecording();
     } else if (!isLongPressRef.current) {
       // Quick tap - take photo
-      console.log('Quick tap, taking photo');
       capturePhoto();
     }
     
@@ -802,8 +845,6 @@ function CameraModal({ isOpen, onClose, onCapture }: CameraModalProps) {
 
   // Handle press cancel (mouse leave, touch cancel)
   const handlePressCancel = useCallback(() => {
-    console.log('Press cancel');
-    
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
@@ -1296,6 +1337,8 @@ export default function EstimatePage() {
   const [isSaving, setIsSaving] = useState(false);
   const [savedToken, setSavedToken] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
+  const [showTokenPopup, setShowTokenPopup] = useState(false);
+  const [savedEmail, setSavedEmail] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1306,29 +1349,36 @@ export default function EstimatePage() {
   useEffect(() => { if (!isSending && messages.length > 0) { const timer = setTimeout(() => textareaRef.current?.focus(), 50); return () => clearTimeout(timer); } }, [isSending, messages.length]);
   useEffect(() => { return () => { pendingFiles.forEach((f) => URL.revokeObjectURL(f.preview)); }; }, []);
 
-  // Initialize chat only once on mount
+  // Initialize chat - restore from localStorage or start fresh
   useEffect(() => {
     let isMounted = true;
     const start = async () => {
-      setIsSending(true);
       try {
-        const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: "", state: null }) });
-        if (!res.ok) throw new Error("Failed to start");
-        const data: any = await res.json();
-        if (!isMounted) return; // Prevent state updates if component unmounted
-        // Use backend-provided project_id (PRJ-XXXXXX) for subsequent requests
-        if (data.project_id && data.project_id !== projectId) {
-          setProjectId(data.project_id);
-        } else if (data.state?.project_id && data.state.project_id !== projectId) {
-          setProjectId(data.state.project_id);
+        setIsSending(true);
+
+        if (!initInFlight) {
+          initInFlight = initializeChat()
+            .finally(() => {
+              initInFlight = null;
+            });
         }
-        setProjectState(data.state);
-        setMessages([{ role: "assistant", content: data.assistant, timestamp: new Date().toISOString() }]);
-      } catch { 
+
+        const result = await initInFlight;
+        if (!isMounted) {
+          return;
+        }
+
+        setProjectId(result.projectId);
+        setProjectState(result.projectState);
+        setMessages(result.messages);
+        if (result.savedToken) {
+          setSavedToken(result.savedToken);
+        }
+      } catch (err) {
         if (isMounted) {
           setError("Failed to connect. Please refresh.");
         }
-      } finally { 
+      } finally {
         if (isMounted) {
           setIsSending(false);
         }
@@ -1458,9 +1508,15 @@ export default function EstimatePage() {
     setPendingFiles([]);
 
     try {
-      const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: messageContent, state: projectState }) });
+      const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: messageContent }) });
       if (!res.ok) throw new Error(await res.text());
       const data: any = await res.json();
+
+      // Store internal_id for draft tracking (if not yet saved with email)
+      if (data.internal_id && !storage.getProjectToken()) {
+        storage.setDraftProjectId(data.internal_id);
+      }
+
       if (data.project_id) {
         setProjectId(data.project_id);
       } else if (data.state?.project_id) {
@@ -1469,7 +1525,7 @@ export default function EstimatePage() {
       setProjectState(data.state);
       setMessages((prev) => [...prev, { role: "assistant", content: data.assistant || "(no response)", timestamp: new Date().toISOString() }]);
     } catch (err) { setError(err instanceof Error ? err.message : "Something went wrong"); } finally { setIsSending(false); }
-  }, [isSending, input, pendingFiles, projectId, projectState]);
+  }, [isSending, input, pendingFiles, projectId]);
 
   const handleSelectTier = useCallback((tierId: string) => { sendMessage(`I select the ${tierId} tier`); }, [sendMessage]);
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }, [sendMessage]);
@@ -1490,20 +1546,42 @@ export default function EstimatePage() {
       setError("Please enter your email address");
       return;
     }
-    
+
     setIsSaving(true);
     setError(null);
-    
+
     try {
       const response: any = await api.saveProject(saveEmail, projectId);
+
+      // Store token in localStorage (replaces draft_project_id)
+      storage.setProjectToken(response.token);
+
       setSavedToken(response.token);
+      setSavedEmail(saveEmail);
       setShowSaveModal(false);
+
+      // Show token popup
+      setShowTokenPopup(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save project");
     } finally {
       setIsSaving(false);
     }
-  }, [saveEmail]);
+  }, [saveEmail, projectId]);
+
+  const handleClearConversation = useCallback(() => {
+    const confirmed = window.confirm(
+      'Are you sure you want to start a new estimation? Your current progress will be lost.'
+    );
+
+    if (confirmed) {
+      // Clear localStorage
+      storage.clearProject();
+
+      // Refresh page to reset state
+      window.location.reload();
+    }
+  }, []);
 
   const handleCopyToken = useCallback(() => {
     if (savedToken) {
@@ -1525,11 +1603,22 @@ export default function EstimatePage() {
                 <p className="text-xs sm:text-sm text-navy-500 dark:text-navy-400 truncate">{projectState.project_title}</p>
               )}
             </div>
-            {projectState?.project_type && (
-              <span className="text-[10px] sm:text-xs font-medium text-navy-600 dark:text-navy-300 bg-navy-100 dark:bg-navy-800 px-2 py-0.5 sm:px-3 sm:py-1 rounded-full capitalize ml-2 flex-shrink-0">
-                {projectState.project_type}
-              </span>
-            )}
+            <div className="flex items-center gap-2 ml-2 flex-shrink-0">
+              {projectState?.project_type && (
+                <span className="text-[10px] sm:text-xs font-medium text-navy-600 dark:text-navy-300 bg-navy-100 dark:bg-navy-800 px-2 py-0.5 sm:px-3 sm:py-1 rounded-full capitalize">
+                  {projectState.project_type}
+                </span>
+              )}
+              {storage.hasProject() && (
+                <button
+                  onClick={handleClearConversation}
+                  className="text-[11px] sm:text-sm px-2.5 py-1 sm:px-3.5 sm:py-1.5 text-rose-700 dark:text-rose-300 border border-rose-300 dark:border-rose-700 rounded-full hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
+                  title="Clear chat and start a new estimation"
+                >
+                  Clear chat
+                </button>
+              )}
+            </div>
           </div>
           <ProgressBar currentStage={projectState?.current_stage || "project_basics"} />
         </div>
@@ -1718,6 +1807,15 @@ export default function EstimatePage() {
 
       {/* Image Lightbox */}
       <ImageLightbox isOpen={!!lightboxImage} imageUrl={lightboxImage || ""} onClose={() => setLightboxImage(null)} />
+
+      {/* Token Popup */}
+      {showTokenPopup && savedToken && (
+        <TokenPopup
+          token={savedToken}
+          email={savedEmail}
+          onClose={() => setShowTokenPopup(false)}
+        />
+      )}
     </div>
   );
 }

@@ -29,10 +29,9 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 # Get database URL from environment
-database_url = os.getenv(
-    "DATABASE_URL",
-    "postgresql://dev:devpass123@localhost:5432/renovationtech"
-)
+database_url = os.getenv("DATABASE_URL")
+if not database_url:
+    raise ValueError("DATABASE_URL environment variable is not set")
 
 # Override the sqlalchemy.url from alembic.ini
 config.set_main_option("sqlalchemy.url", database_url)
