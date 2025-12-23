@@ -200,6 +200,49 @@ async def get_unlock_by_session(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found for this unlock")
 
+    # Ensure payment is completed before updating status or sending emails.
+    if unlock.payment_status != "completed":
+        session = payment_service.get_session(session_id)
+        if session and getattr(session, "payment_status", None) == "paid" and getattr(session, "status", None) == "complete":
+            from datetime import datetime, UTC
+            unlock.payment_status = "completed"
+            unlock.is_active = True
+            unlock.unlocked_at = datetime.now(UTC)
+            project.status = "unlocked"
+            db.commit()
+
+    # Send contractor unlock email only after completion and if not yet sent.
+    if unlock.payment_status == "completed" and not unlock.contractor_email_sent:
+        try:
+            email_service.send_contractor_unlocked(
+                to=unlock.contractor_email,
+                unlock_token=unlock.unlock_token,
+                project_type=project.project_type or "Renovation",
+                total_price=float(project.total_price) if project.total_price else 0.0,
+                zip_code=project.zip_code or "",
+                homeowner_name=project.homeowner_name or "",
+                homeowner_email=project.homeowner_email or "",
+                homeowner_phone=project.homeowner_phone or ""
+            )
+            unlock.contractor_email_sent = True
+            db.commit()
+        except Exception as e:
+            print(f"⚠️ Contractor email failed: {e}")
+
+    # Notify homeowner once if payment completed and not notified.
+    if unlock.payment_status == "completed" and project.homeowner_email and not unlock.homeowner_notified:
+        try:
+            email_service.send_homeowner_project_unlocked(
+                to=project.homeowner_email,
+                project_token=project.token,
+                project_type=project.project_type or "Renovation",
+                total_price=float(project.total_price) if project.total_price else 0.0
+            )
+            unlock.homeowner_notified = True
+            db.commit()
+        except Exception as e:
+            print(f"⚠️ Homeowner email failed: {e}")
+
     unlock_dict = {
         **UnlockResponse.model_validate(unlock).model_dump(),
         "project": ProjectResponse.model_validate(project) if project else None

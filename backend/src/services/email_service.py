@@ -28,7 +28,8 @@ class EmailService:
         self,
         to: str,
         subject: str,
-        html: str
+        html: str,
+        text: Optional[str] = None
     ) -> dict:
         """
         Send an email via Resend.
@@ -52,6 +53,8 @@ class EmailService:
                 "subject": subject,
                 "html": html
             }
+            if text:
+                params["text"] = text
             response = resend.Emails.send(params)
             print(f"✅ Email sent to {to}: {response.get('id', 'unknown')}")
             return response
@@ -244,28 +247,35 @@ class EmailService:
         total_price: float
     ):
         """Notify homeowner that contractor unlocked their project"""
+        text = (
+            "A contractor has unlocked your renovation project.\n\n"
+            f"Project: {project_type}\n"
+            f"Budget: ${total_price:,.0f}\n\n"
+            f"View your project: {self.base_url}/projects?token={project_token}\n"
+        )
         html = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
             <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
-                .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
-                .button {{ display: inline-block; background: #667eea; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: #f3f4f6; color: #111827; padding: 20px; text-align: left; border-radius: 8px 8px 0 0; }}
+                .content {{ background: #ffffff; padding: 24px; border-radius: 0 0 8px 8px; border: 1px solid #e5e7eb; }}
+                .button {{ display: inline-block; background: #f59e0b; color: #111827; padding: 12px 20px; text-decoration: none; border-radius: 6px; margin: 16px 0; font-weight: 600; }}
+                .details {{ background: #f9fafb; padding: 12px 16px; border-radius: 6px; border: 1px solid #e5e7eb; }}
             </style>
         </head>
         <body>
             <div class="header">
-                <h1>🎉 Good News!</h1>
+                <h1>Project unlocked</h1>
             </div>
             
             <div class="content">
-                <p>A contractor has unlocked your renovation project!</p>
+                <p>A contractor has unlocked your renovation project.</p>
                 
-                <div style="background: white; padding: 15px; border-radius: 5px; margin: 15px 0;">
-                    <h3>Project: {project_type}</h3>
+                <div class="details">
+                    <p><strong>Project:</strong> {project_type}</p>
                     <p><strong>Budget:</strong> ${total_price:,.0f}</p>
                 </div>
                 
@@ -283,8 +293,9 @@ class EmailService:
         
         return self.send_email(
             to=to,
-            subject=f"A Contractor Has Unlocked Your Project!",
-            html=html
+            subject="Your renovation project was unlocked",
+            html=html,
+            text=text
         )
     
     def send_homeowner_contractor_details(
@@ -349,4 +360,3 @@ class EmailService:
 
 # Singleton instance
 email_service = EmailService()
-

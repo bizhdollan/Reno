@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { CheckCircle2, ArrowRight, Home, Store, Loader2, KeyRound } from 'lucide-react';
+import { CheckCircle2, ArrowRight, Store, Loader2, KeyRound, Copy, Check } from 'lucide-react';
 import { api } from '../../lib/api';
 
 export default function UnlockSuccessPage() {
@@ -10,6 +10,14 @@ export default function UnlockSuccessPage() {
   const [unlockToken, setUnlockToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (!unlockToken) return;
+    navigator.clipboard.writeText(unlockToken);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   useEffect(() => {
     // If we have a Stripe session_id, look up the unlock details
@@ -74,6 +82,13 @@ export default function UnlockSuccessPage() {
                 <span className="text-xs sm:text-sm font-mono font-semibold text-navy-900 dark:text-white">
                   {unlockToken}
                 </span>
+                <button
+                  onClick={handleCopy}
+                  className="ml-1 inline-flex items-center gap-1 rounded-lg bg-white/70 dark:bg-navy-900/40 px-2 py-1 text-[10px] sm:text-xs text-navy-700 dark:text-navy-200 hover:bg-white dark:hover:bg-navy-900 transition-colors"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
               </div>
             ) : error ? (
               <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
@@ -105,13 +120,12 @@ export default function UnlockSuccessPage() {
               </motion.button>
             </Link>
 
-            <Link to="/">
+            <Link to="/projects">
               <motion.button
                 whileTap={{ scale: 0.97 }}
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-navy-100 dark:bg-navy-800 text-navy-800 dark:text-navy-100 font-medium border border-navy-200 dark:border-navy-700"
               >
-                <Home className="w-4 h-4" />
-                Go to Home
+                View My Projects
               </motion.button>
             </Link>
           </div>
@@ -120,5 +134,4 @@ export default function UnlockSuccessPage() {
     </div>
   );
 }
-
 
