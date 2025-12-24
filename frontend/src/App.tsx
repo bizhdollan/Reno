@@ -4,6 +4,7 @@ import LandingPage from './app/routes/index';
 import EstimatePage from './app/routes/EstimatePage';
 import MarketplacePage from './app/routes/MarketplacePage';
 import ProjectsPage from './app/routes/ProjectsPage';
+import ProjectDetailPage from './app/routes/ProjectDetailPage';
 import UnlockSuccessPage from './app/routes/UnlockSuccessPage';
 
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/estimate" element={<EstimatePage />} />
         <Route path="/marketplace" element={<MarketplacePage />} />
         <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/projects/:token" element={<ProjectDetailPage />} />
         <Route path="/unlock/success" element={<UnlockSuccessPage />} />
       </Routes>
     </div>

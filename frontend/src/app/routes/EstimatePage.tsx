@@ -2,9 +2,9 @@ import { useState, useRef, useEffect, useMemo, useCallback, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { motion, AnimatePresence } from "framer-motion";
-import { 
+import {
   Send, X, Paperclip, Check, ChevronDown, ChevronUp, Camera, SwitchCamera,
-  Bot, User, Sparkles, CheckCircle2, Circle, Play, RotateCcw, Film, Mail, Copy, CheckCircle
+  Bot, User, Sparkles, CheckCircle2, Circle, Play, RotateCcw, Film, Mail, Copy, CheckCircle, Phone
 } from "lucide-react";
 import rehypeRaw from "rehype-raw";
 import ImageLightbox from "../../components/shared/ImageLightBox";
@@ -1333,12 +1333,15 @@ export default function EstimatePage() {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [showSaveModal, setShowSaveModal] = useState(false);
-  const [saveEmail, setSaveEmail] = useState("");
+  const [saveForm, setSaveForm] = useState({
+    name: "",
+    email: "",
+    phone: ""
+  });
   const [isSaving, setIsSaving] = useState(false);
   const [savedToken, setSavedToken] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [showTokenPopup, setShowTokenPopup] = useState(false);
-  const [savedEmail, setSavedEmail] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1542,8 +1545,8 @@ export default function EstimatePage() {
   }, [isCompleted, savedToken, showSaveModal]);
 
   const handleSaveProject = useCallback(async () => {
-    if (!saveEmail.trim()) {
-      setError("Please enter your email address");
+    if (!saveForm.name.trim() || !saveForm.email.trim() || !saveForm.phone.trim()) {
+      setError("Please fill in all fields");
       return;
     }
 
@@ -1551,23 +1554,24 @@ export default function EstimatePage() {
     setError(null);
 
     try {
-      const response: any = await api.saveProject(saveEmail, projectId);
+      const response: any = await api.saveProject(saveForm.email, projectId, saveForm.name, saveForm.phone);
 
       // Store token in localStorage (replaces draft_project_id)
       storage.setProjectToken(response.token);
 
       setSavedToken(response.token);
-      setSavedEmail(saveEmail);
       setShowSaveModal(false);
 
-      // Show token popup
-      setShowTokenPopup(true);
+      // Show token popup after a small delay to let modal close animation complete
+      setTimeout(() => {
+        setShowTokenPopup(true);
+      }, 300);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save project");
     } finally {
       setIsSaving(false);
     }
-  }, [saveEmail, projectId]);
+  }, [saveForm, projectId]);
 
   const handleClearConversation = useCallback(() => {
     const confirmed = window.confirm(
@@ -1752,10 +1756,27 @@ export default function EstimatePage() {
                 </div>
                 
                 <p className="text-sm text-navy-600 dark:text-navy-400 mb-4">
-                  Enter your email to receive your project token. You'll need this token to access your project later.
+                  Enter your details to save your project. You'll receive your project token via email.
                 </p>
-                
+
                 <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-navy-700 dark:text-navy-300 mb-2">
+                      Full Name
+                    </label>
+                    <div className="relative">
+                      <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
+                      <input
+                        type="text"
+                        value={saveForm.name}
+                        onChange={(e) => setSaveForm({ ...saveForm, name: e.target.value })}
+                        placeholder="John Doe"
+                        disabled={isSaving}
+                        className="w-full pl-10 pr-4 py-3 bg-navy-50 dark:bg-navy-900 border border-navy-200 dark:border-navy-700 rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+
                   <div>
                     <label className="block text-sm font-medium text-navy-700 dark:text-navy-300 mb-2">
                       Email Address
@@ -1764,9 +1785,26 @@ export default function EstimatePage() {
                       <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
                       <input
                         type="email"
-                        value={saveEmail}
-                        onChange={(e) => setSaveEmail(e.target.value)}
+                        value={saveForm.email}
+                        onChange={(e) => setSaveForm({ ...saveForm, email: e.target.value })}
                         placeholder="your@email.com"
+                        disabled={isSaving}
+                        className="w-full pl-10 pr-4 py-3 bg-navy-50 dark:bg-navy-900 border border-navy-200 dark:border-navy-700 rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-navy-700 dark:text-navy-300 mb-2">
+                      Phone Number
+                    </label>
+                    <div className="relative">
+                      <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
+                      <input
+                        type="tel"
+                        value={saveForm.phone}
+                        onChange={(e) => setSaveForm({ ...saveForm, phone: e.target.value })}
+                        placeholder="(555) 123-4567"
                         disabled={isSaving}
                         className="w-full pl-10 pr-4 py-3 bg-navy-50 dark:bg-navy-900 border border-navy-200 dark:border-navy-700 rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
                         onKeyDown={(e) => {
@@ -1788,11 +1826,11 @@ export default function EstimatePage() {
                     </button>
                     <motion.button
                       onClick={handleSaveProject}
-                      disabled={isSaving || !saveEmail.trim()}
+                      disabled={isSaving || !saveForm.name.trim() || !saveForm.email.trim() || !saveForm.phone.trim()}
                       whileTap={{ scale: 0.98 }}
                       className="flex-1 py-3 px-4 bg-gradient-to-r from-amber-500 to-amber-400 text-navy-900 font-semibold rounded-xl shadow-lg shadow-amber-500/25 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {isSaving ? "Saving..." : "Save Project"}
+                      {isSaving ? "Saving..." : "Continue"}
                     </motion.button>
                   </div>
                 </div>
@@ -1812,7 +1850,22 @@ export default function EstimatePage() {
       {showTokenPopup && savedToken && (
         <TokenPopup
           token={savedToken}
-          email={savedEmail}
+          email={saveForm.email}
+          onSaveAsDraft={async () => {
+            // Project is already saved, just close the popup
+            // Status defaults to draft if not explicitly published
+            setShowTokenPopup(false);
+          }}
+          onPublishToMarketplace={async () => {
+            // Call publish API with the saved form data
+            try {
+              await api.publishProject(savedToken, saveForm.name, saveForm.email, saveForm.phone);
+              setShowTokenPopup(false);
+            } catch (err) {
+              console.error('Failed to publish:', err);
+              throw err; // Let TokenPopup handle the error
+            }
+          }}
           onClose={() => setShowTokenPopup(false)}
         />
       )}

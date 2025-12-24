@@ -60,8 +60,12 @@ async def save_project(
                 detail="No completed project found. Please complete the estimation first."
             )
     
-    # Update project with email
+    # Update project with homeowner details
     project.homeowner_email = request.email
+    if request.homeowner_name:
+        project.homeowner_name = request.homeowner_name
+    if request.homeowner_phone:
+        project.homeowner_phone = request.homeowner_phone
     
     # Check if email already sent (don't send duplicate)
     email_sent = False

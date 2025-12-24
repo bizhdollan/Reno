@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FolderOpen, Plus, Clock, CheckCircle2, Search, Loader2, Copy, CheckCircle, KeyRound, User, Globe, Mail, Phone, X } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { FolderOpen, Plus, Clock, CheckCircle2, Search, Loader2, Copy, CheckCircle, KeyRound, User, Globe, Mail, Phone, X, Eye } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api';
 
 interface Project {
@@ -14,7 +14,7 @@ interface Project {
   zipCode: string | null;
   isUnlock?: boolean;
   contractorEmail?: string | null;
-  // Homeowner contact (for unlocked projects)
+  // Homeowner contact
   homeownerName?: string | null;
   homeownerEmail?: string | null;
   homeownerPhone?: string | null;
@@ -23,10 +23,12 @@ interface Project {
 }
 
 export default function ProjectsPage() {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
   const [tokenInput, setTokenInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [publishingProject, setPublishingProject] = useState<Project | null>(null);
   const [publishForm, setPublishForm] = useState({
@@ -35,7 +37,6 @@ export default function ProjectsPage() {
     homeownerPhone: '',
   });
   const [isPublishing, setIsPublishing] = useState(false);
-  const [viewingProject, setViewingProject] = useState<Project | null>(null);
 
   const normalizeToken = (token: string) => token.trim().toUpperCase();
 
@@ -63,6 +64,15 @@ export default function ProjectsPage() {
 
       if (type === 'project') {
         const project = await api.getProjectByToken(normalized);
+
+        // Debug: Log the project response to see what we're getting
+        console.log('📦 Project fetched from backend:', project);
+        console.log('👤 Homeowner details:', {
+          name: project.homeowner_name,
+          email: project.homeowner_email,
+          phone: project.homeowner_phone
+        });
+
         mappedProject = {
           id: project.id,
           token: project.token,
@@ -72,6 +82,9 @@ export default function ProjectsPage() {
           totalCost: project.total_price ? parseFloat(project.total_price) : null,
           zipCode: project.zip_code || null,
           isUnlock: false,
+          homeownerName: project.homeowner_name || null,
+          homeownerEmail: project.homeowner_email || null,
+          homeownerPhone: project.homeowner_phone || null,
         };
       } else {
         // UNL unlock token
@@ -127,9 +140,64 @@ export default function ProjectsPage() {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(amount);
   }
 
+  const handlePublishClick = (project: Project) => {
+    // Debug: Log what we're checking
+    console.log('🔍 Checking if project has homeowner details:', {
+      name: project.homeownerName,
+      email: project.homeownerEmail,
+      phone: project.homeownerPhone,
+      hasAll: !!(project.homeownerName && project.homeownerEmail && project.homeownerPhone)
+    });
+
+    // Check if project already has homeowner details
+    if (project.homeownerName && project.homeownerEmail && project.homeownerPhone) {
+      console.log('✅ All details present, publishing directly!');
+      // Directly publish without showing the form
+      handlePublishDirect(project);
+    } else {
+      console.log('❌ Missing details, showing form. Missing:', {
+        name: !project.homeownerName,
+        email: !project.homeownerEmail,
+        phone: !project.homeownerPhone
+      });
+      // Show form to collect missing details
+      setPublishingProject(project);
+    }
+  };
+
+  const handlePublishDirect = async (project: Project) => {
+    setIsPublishing(true);
+    setError(null);
+    setSuccessMessage(null);
+
+    try {
+      await api.publishProject(
+        project.token,
+        project.homeownerName!,
+        project.homeownerEmail!,
+        project.homeownerPhone!
+      );
+
+      // Update project status in the list
+      setProjects(prev => prev.map(p =>
+        p.token === project.token
+          ? { ...p, status: 'published' }
+          : p
+      ));
+
+      // Show success message
+      setSuccessMessage('Project published to marketplace successfully!');
+      setTimeout(() => setSuccessMessage(null), 5000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish project');
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
   const handlePublish = async () => {
     if (!publishingProject) return;
-    
+
     if (!publishForm.homeownerName.trim() || !publishForm.homeownerEmail.trim() || !publishForm.homeownerPhone.trim()) {
       setError('Please fill in all contact details');
       return;
@@ -137,6 +205,7 @@ export default function ProjectsPage() {
 
     setIsPublishing(true);
     setError(null);
+    setSuccessMessage(null);
 
     try {
       await api.publishProject(
@@ -145,16 +214,20 @@ export default function ProjectsPage() {
         publishForm.homeownerEmail,
         publishForm.homeownerPhone
       );
-      
+
       // Update project status in the list
-      setProjects(prev => prev.map(p => 
-        p.token === publishingProject.token 
-          ? { ...p, status: 'published' }
+      setProjects(prev => prev.map(p =>
+        p.token === publishingProject.token
+          ? { ...p, status: 'published', homeownerName: publishForm.homeownerName, homeownerEmail: publishForm.homeownerEmail, homeownerPhone: publishForm.homeownerPhone }
           : p
       ));
-      
+
       setPublishingProject(null);
       setPublishForm({ homeownerName: '', homeownerEmail: '', homeownerPhone: '' });
+
+      // Show success message
+      setSuccessMessage('Project published to marketplace successfully!');
+      setTimeout(() => setSuccessMessage(null), 5000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to publish project');
     } finally {
@@ -222,6 +295,19 @@ export default function ProjectsPage() {
             <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl">
               <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
             </div>
+          )}
+          {successMessage && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="mt-4 p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl"
+            >
+              <p className="text-sm text-emerald-600 dark:text-emerald-400 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4" />
+                {successMessage}
+              </p>
+            </motion.div>
           )}
         </div>
 
@@ -321,30 +407,38 @@ export default function ProjectsPage() {
                     </div>
                   </div>
                   
-                  {/* View details button for unlocked contractor projects */}
-                  {project.isUnlock && (
-                    <div className="mt-4 pt-4 border-t border-navy-100 dark:border-navy-700">
-                      <motion.button
-                        onClick={() => setViewingProject(project)}
-                        whileTap={{ scale: 0.98 }}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-navy-900 dark:bg-navy-700 text-white font-medium rounded-xl hover:bg-navy-800 dark:hover:bg-navy-600 transition-all"
-                      >
-                        <KeyRound className="w-4 h-4" />
-                        View Full Project & Homeowner Details
-                      </motion.button>
-                    </div>
-                  )}
+                  {/* View details button */}
+                  <div className="mt-4 pt-4 border-t border-navy-100 dark:border-navy-700">
+                    <motion.button
+                      onClick={() => navigate(`/projects/${project.token}`)}
+                      whileTap={{ scale: 0.98 }}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-navy-900 dark:bg-navy-700 text-white font-medium rounded-xl hover:bg-navy-800 dark:hover:bg-navy-600 transition-all"
+                    >
+                      <Eye className="w-4 h-4" />
+                      {project.isUnlock ? 'View Full Project & Homeowner Details' : 'View Project Details'}
+                    </motion.button>
+                  </div>
                   
-                  {/* Publish button for completed homeowner projects */}
-                  {!project.isUnlock && project.status === 'completed' && (
+                  {/* Publish button for draft/completed homeowner projects */}
+                  {!project.isUnlock && (project.status === 'completed' || project.status === 'draft') && (
                     <div className="mt-4 pt-4 border-t border-navy-100 dark:border-navy-700">
                       <motion.button
-                        onClick={() => setPublishingProject(project)}
+                        onClick={() => handlePublishClick(project)}
+                        disabled={isPublishing}
                         whileTap={{ scale: 0.98 }}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-emerald-400 text-white font-medium rounded-xl shadow-lg shadow-emerald-500/25 hover:shadow-xl hover:shadow-emerald-500/30 transition-all"
+                        className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-emerald-400 text-white font-medium rounded-xl shadow-lg shadow-emerald-500/25 hover:shadow-xl hover:shadow-emerald-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Globe className="w-4 h-4" />
-                        Publish to Marketplace
+                        {isPublishing ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Publishing...
+                          </>
+                        ) : (
+                          <>
+                            <Globe className="w-4 h-4" />
+                            Publish to Marketplace
+                          </>
+                        )}
                       </motion.button>
                     </div>
                   )}
@@ -485,123 +579,6 @@ export default function ProjectsPage() {
           )}
         </AnimatePresence>
 
-        {/* View Details Modal for contractor unlocks */}
-        <AnimatePresence>
-          {viewingProject && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center p-4"
-              onClick={() => setViewingProject(null)}
-            >
-              <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-              
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                onClick={(e) => e.stopPropagation()}
-                className="relative bg-white dark:bg-navy-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
-              >
-                {/* Header */}
-                <div className="sticky top-0 bg-white dark:bg-navy-800 border-b border-navy-100 dark:border-navy-700 px-6 py-4 flex items-center justify-between z-10">
-                  <h2 className="text-xl font-bold text-navy-900 dark:text-white">
-                    {viewingProject.projectType || 'Project'} (Unlocked)
-                  </h2>
-                  <button
-                    onClick={() => setViewingProject(null)}
-                    className="p-2 hover:bg-navy-100 dark:hover:bg-navy-700 rounded-lg transition-colors"
-                  >
-                    <X className="w-5 h-5 text-navy-500" />
-                  </button>
-                </div>
-                
-                {/* Content */}
-                <div className="p-6 space-y-6">
-                  {/* Project Info */}
-                  <div className="grid sm:grid-cols-2 gap-4">
-                    <div className="bg-navy-50 dark:bg-navy-900/50 rounded-xl p-4">
-                      <h4 className="text-sm font-medium text-navy-500 dark:text-navy-400 mb-1">Project Type</h4>
-                      <p className="font-medium text-navy-900 dark:text-white">
-                        {viewingProject.projectType || 'Project'}
-                      </p>
-                    </div>
-                    <div className="bg-navy-50 dark:bg-navy-900/50 rounded-xl p-4">
-                      <h4 className="text-sm font-medium text-navy-500 dark:text-navy-400 mb-1">Budget</h4>
-                      <p className="font-medium text-navy-900 dark:text-white">
-                        {viewingProject.totalCost ? formatCurrency(viewingProject.totalCost) : 'Not set'}
-                      </p>
-                    </div>
-                    <div className="bg-navy-50 dark:bg-navy-900/50 rounded-xl p-4">
-                      <h4 className="text-sm font-medium text-navy-500 dark:text-navy-400 mb-1">Location</h4>
-                      <p className="font-medium text-navy-900 dark:text-white">
-                        {viewingProject.zipCode || 'N/A'}
-                      </p>
-                    </div>
-                    <div className="bg-navy-50 dark:bg-navy-900/50 rounded-xl p-4">
-                      <h4 className="text-sm font-medium text-navy-500 dark:text-navy-400 mb-1">Created</h4>
-                      <p className="font-medium text-navy-900 dark:text-white">
-                        {new Date(viewingProject.createdAt).toLocaleString()}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Homeowner Contact */}
-                  {viewingProject.homeownerName || viewingProject.homeownerEmail || viewingProject.homeownerPhone ? (
-                    <div className="bg-emerald-50 dark:bg-emerald-500/10 rounded-xl p-5 border border-emerald-200 dark:border-emerald-500/20">
-                      <h4 className="font-medium text-navy-900 dark:text-white flex items-center gap-2 mb-3">
-                        <User className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                        Homeowner Contact
-                      </h4>
-                      <p className="text-xs text-navy-500 dark:text-navy-400 mb-3">
-                        Use this information to reach out to the homeowner directly about this project.
-                      </p>
-                      <div className="space-y-2 text-sm">
-                        {viewingProject.homeownerName && (
-                          <div className="flex items-center gap-2 text-navy-700 dark:text-navy-300">
-                            <User className="w-3.5 h-3.5 text-navy-400" />
-                            <span className="font-medium">{viewingProject.homeownerName}</span>
-                          </div>
-                        )}
-                        {viewingProject.homeownerEmail && (
-                          <a 
-                            href={`mailto:${viewingProject.homeownerEmail}`} 
-                            className="flex items-center gap-2 text-amber-600 dark:text-amber-400 hover:underline"
-                          >
-                            <Mail className="w-3.5 h-3.5" />
-                            {viewingProject.homeownerEmail}
-                          </a>
-                        )}
-                        {viewingProject.homeownerPhone && (
-                          <a 
-                            href={`tel:${viewingProject.homeownerPhone}`} 
-                            className="flex items-center gap-2 text-amber-600 dark:text-amber-400 hover:underline"
-                          >
-                            <Phone className="w-3.5 h-3.5" />
-                            {viewingProject.homeownerPhone}
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="bg-navy-50 dark:bg-navy-900/50 rounded-xl p-5 border border-navy-200 dark:border-navy-700">
-                      <p className="text-sm text-navy-500 dark:text-navy-400">
-                        Homeowner contact information not available yet.
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Notes */}
-                  <p className="text-xs text-navy-500 dark:text-navy-400">
-                    In this version, the key information for contractors is budget, location, project type, and homeowner contact.
-                    We can extend this modal later to include images and full scope text from the stored estimate.
-                  </p>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
     </div>
   );

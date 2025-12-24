@@ -95,6 +95,8 @@ class ProjectSaveRequest(BaseModel):
     """Request to save project and get token"""
     email: EmailStr
     project_token: Optional[str] = None  # Optional: if not provided, finds latest project for email
+    homeowner_name: Optional[str] = None
+    homeowner_phone: Optional[str] = None
 
 
 class ProjectSaveResponse(BaseModel):
