@@ -4,7 +4,7 @@ from typing import AsyncGenerator, Optional, Any
 import litellm
 from litellm import acompletion
 
-from src.config import get_llm_config, get_vlm_config, LLMConfig, VLMConfig
+from src.config import get_llm_config, get_vlm_config, get_vgm_config, LLMConfig, VLMConfig, VGMConfig
 
 
 # supported image formats across all providers (openai, anthropic, gemini)
@@ -205,3 +205,135 @@ class LLMProvider:
             model=overrides.get("model", config.model),
             api_key=overrides.get("api_key", config.api_key)
         )
+
+    @classmethod
+    def for_vgm(cls, **overrides) -> "LLMProvider":
+        """Create provider for Vision Generation Model (image generation)."""
+        config = get_vgm_config()
+        return cls(
+            provider=overrides.get("provider", config.provider),
+            model=overrides.get("model", config.model),
+            api_key=overrides.get("api_key", config.api_key)
+        )
+
+    async def generate_image(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs: Any
+    ) -> dict:
+        """
+        Generate an image using a vision generation model (e.g., Gemini 2.5 Flash Image).
+
+        The model returns BOTH text description and image.
+
+        Returns:
+            dict with keys:
+                - image_data: base64 decoded bytes
+                - mime_type: str (e.g., 'image/png')
+                - data_url: str (full data URL with base64 encoding)
+                - description: str (text description of changes made)
+        """
+        self._validate_messages(messages)
+
+        try:
+            response = await acompletion(
+                model=self.model,
+                messages=messages,
+                # Note: modalities param removed per test file
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False,
+                **kwargs
+            )
+
+            choice = response.choices[0]
+
+            # =====================================================================
+            # EXTRACT TEXT DESCRIPTION
+            # =====================================================================
+            description = ""
+            message_content = choice.message.content
+
+            if isinstance(message_content, str):
+                description = message_content
+            else:
+                # Content is a list of parts
+                for part in message_content:
+                    if hasattr(part, 'text') and part.text:
+                        description = part.text
+                        break
+
+            print(f"[VGM] Extracted description: {description[:100]}..." if len(description) > 100 else f"[VGM] Extracted description: {description}")
+
+            # =====================================================================
+            # EXTRACT IMAGE - Check multiple locations
+            # =====================================================================
+            image_data = None
+            mime_type = "image/png"
+            image_data_url = None
+
+            # Location 1: Native Gemini structure (most common)
+            if hasattr(response, '_hidden_params') and 'candidates' in response._hidden_params:
+                candidates = response._hidden_params['candidates']
+                for candidate in candidates:
+                    if 'content' in candidate and 'parts' in candidate['content']:
+                        for part in candidate['content']['parts']:
+                            # Check for inline_data (native Gemini format)
+                            if isinstance(part, dict) and 'inline_data' in part:
+                                import base64
+                                image_data = base64.b64decode(part['inline_data']['data'])
+                                mime_type = part['inline_data'].get('mime_type', 'image/png')
+                                print(f"[VGM] Found image in native Gemini structure (inline_data)")
+                                break
+                            # Check for object with inline_data attribute
+                            elif hasattr(part, 'inline_data') and part.inline_data:
+                                import base64
+                                image_data = base64.b64decode(part.inline_data.data)
+                                mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
+                                print(f"[VGM] Found image in native Gemini structure (inline_data attr)")
+                                break
+                        if image_data:
+                            break
+
+            # Location 2: LiteLLM images array
+            if not image_data and hasattr(choice.message, 'images') and choice.message.images:
+                image_data_url = choice.message.images[0]["image_url"]["url"]
+
+                # Parse the data URL
+                # Format: data:image/png;base64,<base64_string>
+                if image_data_url.startswith("data:"):
+                    header, base64_string = image_data_url.split(",", 1)
+                    mime_type = header.split(":")[1].split(";")[0]
+
+                    import base64
+                    image_data = base64.b64decode(base64_string)
+                    print(f"[VGM] Found image in LiteLLM structure")
+                else:
+                    raise LLMProviderError(f"Unexpected image URL format: {image_data_url[:50]}")
+
+            if not image_data:
+                raise LLMProviderError("No image found in response. Checked both native Gemini and LiteLLM structures.")
+
+            # Create data URL if not already present
+            if not image_data_url:
+                import base64
+                base64_string = base64.b64encode(image_data).decode('utf-8')
+                image_data_url = f"data:{mime_type};base64,{base64_string}"
+
+            # Log token usage if available
+            if hasattr(response, 'usage') and response.usage:
+                print(f"[VGM Usage] Prompt tokens: {response.usage.prompt_tokens}, "
+                      f"Completion tokens: {response.usage.completion_tokens}, "
+                      f"Total: {response.usage.total_tokens}")
+
+            return {
+                "image_data": image_data,
+                "mime_type": mime_type,
+                "data_url": image_data_url,
+                "description": description
+            }
+
+        except Exception as e:
+            raise LLMProviderError(f"Image generation failed: {str(e)}") from e

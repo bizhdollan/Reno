@@ -15,4 +15,5 @@ dependencies = [
     "stripe>=14.1.0",
     "resend>=2.19.0",
     "requests>=2.31.0",
+    "pillow>=12.0.0",
 ]

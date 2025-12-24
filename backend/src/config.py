@@ -58,3 +58,27 @@ class VLMConfig:
 
 def get_vlm_config() -> VLMConfig:
     return VLMConfig.from_env()
+
+
+@dataclass
+class VGMConfig:
+    """Vision Generation Model config - for image generation (e.g., Gemini 2.5 Flash Image)"""
+    provider: str
+    model: str
+    api_key: str
+
+    @classmethod
+    def from_env(cls) -> "VGMConfig":
+        # VGM is specifically for Gemini image generation
+        provider = os.getenv("GEMINI_IGM_PROVIDER", "gemini")
+        model = os.getenv("GEMINI_IGM_MODEL", "gemini/gemini-2.5-flash-image")
+        api_key = os.getenv("GEMINI_IGM_API_KEY")
+
+        if not api_key:
+            raise ValueError("GEMINI_IGM_API_KEY environment variable is required for image generation")
+
+        return cls(provider=provider, model=model, api_key=api_key)
+
+
+def get_vgm_config() -> VGMConfig:
+    return VGMConfig.from_env()

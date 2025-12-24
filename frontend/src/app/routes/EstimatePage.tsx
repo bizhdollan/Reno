@@ -1300,9 +1300,20 @@ const MessageBubble = memo(function MessageBubble({ message, onSelectTier, onIma
                   p: ({ children }) => <p className="my-2">{children}</p>,
                   ul: ({ children }) => <ul className="list-disc list-inside my-2 space-y-1">{children}</ul>,
                   ol: ({ children }) => <ol className="list-decimal list-inside my-2 space-y-1">{children}</ol>,
-                  img: ({ src, alt }) => (
-                    <img src={getImageSrc(src || "")} alt={alt} onClick={() => onImageClick?.(getImageSrc(src || ""))} className="rounded-xl my-3 shadow-sm w-36 h-24 object-cover cursor-pointer hover:opacity-90 transition-opacity" loading="lazy" />
-                  ),
+                  img: ({ src, alt, ...props }) => {
+                    // Check if image has inline styles (from backend) - preserve them
+                    const style = (props as any).style;
+                    return (
+                      <img
+                        src={getImageSrc(src || "")}
+                        alt={alt}
+                        onClick={() => onImageClick?.(getImageSrc(src || ""))}
+                        className="rounded-xl my-3 shadow-sm cursor-pointer hover:opacity-90 transition-opacity max-w-full"
+                        style={style}
+                        loading="lazy"
+                      />
+                    );
+                  },
                   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
                   hr: () => <hr className="my-4 border-navy-200 dark:border-navy-700" />,
                 }}>{textContent}</ReactMarkdown>
@@ -1512,7 +1523,32 @@ export default function EstimatePage() {
 
     try {
       const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: messageContent }) });
-      if (!res.ok) throw new Error(await res.text());
+
+      // Handle non-OK responses with structured error parsing
+      if (!res.ok) {
+        let errorMessage = "Something went wrong. Please try again.";
+        try {
+          const errorData = await res.json();
+          // Use structured error message if available
+          if (errorData.message) {
+            errorMessage = errorData.message;
+          } else if (errorData.detail) {
+            errorMessage = errorData.detail;
+          } else if (errorData.error) {
+            errorMessage = errorData.error;
+          }
+          // Show retry hint if available
+          if (errorData.retry_after) {
+            errorMessage += ` (retry in ${errorData.retry_after}s)`;
+          }
+        } catch {
+          // Fallback to text if not JSON
+          const text = await res.text();
+          if (text) errorMessage = text;
+        }
+        throw new Error(errorMessage);
+      }
+
       const data: any = await res.json();
 
       // Store internal_id for draft tracking (if not yet saved with email)
@@ -1527,7 +1563,14 @@ export default function EstimatePage() {
       }
       setProjectState(data.state);
       setMessages((prev) => [...prev, { role: "assistant", content: data.assistant || "(no response)", timestamp: new Date().toISOString() }]);
-    } catch (err) { setError(err instanceof Error ? err.message : "Something went wrong"); } finally { setIsSending(false); }
+    } catch (err) {
+      // Handle network errors (no connection, etc.)
+      if (err instanceof TypeError && err.message === 'Failed to fetch') {
+        setError("Unable to connect. Please check your internet connection.");
+      } else {
+        setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+      }
+    } finally { setIsSending(false); }
   }, [isSending, input, pendingFiles, projectId]);
 
   const handleSelectTier = useCallback((tierId: string) => { sendMessage(`I select the ${tierId} tier`); }, [sendMessage]);

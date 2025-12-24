@@ -180,72 +180,114 @@ async def detect_user_intent(user_message: str) -> dict:
 async def final_review_node(state: ProjectState) -> dict:
     """
     Final review node.
-    
+
     - Shows complete summary of all confirmed data
     - User can confirm to proceed or request changes
     - Moves to cost_estimation when confirmed
     """
     messages = state.get("messages", [])
     user_message, _ = get_latest_user_message(messages)
-    
+
     updates = {}
-    
-    # If user provided a message, use AI to detect intent
+
+    # If user provided a message, check for changes first
     if user_message:
+        msg_lower = user_message.lower().strip()
+
+        # Keywords indicating visual/design changes that need image regeneration
+        visual_change_keywords = [
+            "should be", "should have", "add ", "change ", "make it", "make the",
+            "i want", "put ", "use ", "replace", "remove ", "tiles", "marble",
+            "wood", "carpet", "paint", "color", "darker", "lighter", "bigger",
+            "smaller", "floor", "wall", "ceiling", "flooring", "wallpaper"
+        ]
+
+        # Check if user wants a visual change - go directly to confirming_proposal
+        wants_visual_change = any(kw in msg_lower for kw in visual_change_keywords)
+
+        if wants_visual_change:
+            print(f"[final_review] Visual change detected: going back to confirming_proposal with feedback")
+            # Store the change request as pending feedback
+            existing_feedback = list(state.get("image_generation_feedback", []))
+            existing_feedback.append(user_message)
+            updates["image_generation_feedback"] = existing_feedback
+            updates["pending_feedback"] = user_message
+
+            # Go directly to confirming_proposal to regenerate
+            updates["current_stage"] = "image_analysis_generation"
+            updates["image_sub_state"] = "confirming_proposal"
+            updates["awaiting_user_input"] = False
+            # Signal that we're coming back with a change request
+            updates["_pending_regeneration"] = user_message
+            updates["messages"] = []
+            return updates
+
+        # Use AI to detect other intents
         intent_result = await detect_user_intent(user_message)
         intent = intent_result.get("intent", "unclear")
-        
+
         print(f"[final_review] User intent: {intent} | confidence: {intent_result.get('confidence')} | reasoning: {intent_result.get('reasoning')}")
-        
+
         if intent == "confirm":
             updates["current_stage"] = "cost_estimation"
             updates["user_confirmed_continue"] = True
             updates["awaiting_user_input"] = False
             updates["messages"] = []
             return updates
-        
+
         elif intent == "go_back_to_extraction":
             updates["current_stage"] = "image_analysis_generation"
             updates["image_sub_state"] = "confirming_extraction"
             updates["awaiting_user_input"] = False
             updates["messages"] = []
             return updates
-        
+
         elif intent == "go_back_to_vision":
             updates["current_stage"] = "image_analysis_generation"
-            updates["image_sub_state"] = "collecting_vision"
+            updates["image_sub_state"] = "design_conversation"  # Use design_conversation for flexibility
             updates["awaiting_user_input"] = False
             updates["messages"] = []
             return updates
-        
+
         elif intent == "request_changes":
             specific_change = intent_result.get("specific_change")
             if specific_change:
-                response = (
-                    f"I understand you want to change: **{specific_change}**\n\n"
-                    f"Would you like to:\n"
-                    f"- Go back to **image analysis** to correct extracted data\n"
-                    f"- Update your **renovation vision**\n\n"
-                    f"Let me know which option works for you."
-                )
+                # Check if the specific change is visual
+                change_lower = specific_change.lower()
+                if any(kw in change_lower for kw in visual_change_keywords):
+                    # Go directly to confirming_proposal
+                    existing_feedback = list(state.get("image_generation_feedback", []))
+                    existing_feedback.append(specific_change)
+                    updates["image_generation_feedback"] = existing_feedback
+                    updates["current_stage"] = "image_analysis_generation"
+                    updates["image_sub_state"] = "confirming_proposal"
+                    updates["awaiting_user_input"] = False
+                    updates["_pending_regeneration"] = specific_change
+                    updates["messages"] = []
+                    return updates
+                else:
+                    response = (
+                        f"I understand you want to change: **{specific_change}**\n\n"
+                        f"Would you like to:\n"
+                        f"- Go back to **image preview** to see changes\n"
+                        f"- Update your **renovation vision**\n\n"
+                        f"Let me know which option works for you."
+                    )
             else:
                 response = (
                     "What would you like to change?\n\n"
-                    "You can:\n"
-                    "- Go back to **image analysis** to correct extracted data\n"
-                    "- Update your **renovation vision**\n"
-                    "- Specify exactly what needs to be updated\n\n"
-                    "Let me know what you'd like to do."
+                    "Just describe what you want (e.g., 'add tiles to the floor') "
+                    "and I'll regenerate the preview for you."
                 )
             updates["messages"] = [{"role": "assistant", "content": response}]
             updates["awaiting_user_input"] = True
             return updates
-        
+
         else:  # unclear
             response = (
                 "I'm not sure what you'd like to do. Could you please clarify?\n\n"
                 "- Say **'yes'** or **'proceed'** to generate your cost estimate\n"
-                "- Or tell me what you'd like to change"
+                "- Or describe what changes you want (e.g., 'change the floor to tiles')"
             )
             updates["messages"] = [{"role": "assistant", "content": response}]
             updates["awaiting_user_input"] = True

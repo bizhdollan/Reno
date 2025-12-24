@@ -1,10 +1,14 @@
 """Chat endpoint for LangGraph renovation flow."""
 
+import traceback
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+import httpx
 
 from src.core.langgraph import create_initial_state, run_conversation
 from src.core.langgraph.graph import get_message_content
@@ -12,6 +16,14 @@ from src.core.langgraph.state import ProjectState
 from src.db.database import get_db
 from src.db.models import Project, ConversationState
 from src.utils.token_generator import generate_token
+
+
+class ChatError(BaseModel):
+    """Structured error response for chat endpoint."""
+    error: str = Field(..., description="Error type")
+    message: str = Field(..., description="User-friendly error message")
+    details: Optional[str] = Field(None, description="Technical details (only in dev mode)")
+    retry_after: Optional[int] = Field(None, description="Seconds to wait before retry")
 
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
@@ -158,9 +170,123 @@ async def chat(
             user_message=payload.message,
             state=state,
         )
-    except Exception as exc:  # pragma: no cover - surfaced as HTTP error
-        # Surface provider errors cleanly
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        # LLM/API timeout
+        print(f"[chat] Timeout error: {exc}")
+        return JSONResponse(
+            status_code=504,
+            content=ChatError(
+                error="timeout",
+                message="The request took too long. Please try again.",
+                details=str(exc),
+                retry_after=5
+            ).model_dump()
+        )
+    except httpx.HTTPStatusError as exc:
+        # HTTP errors from external APIs
+        status_code = exc.response.status_code
+        print(f"[chat] HTTP error {status_code}: {exc}")
+
+        if status_code == 429:
+            # Rate limit
+            return JSONResponse(
+                status_code=429,
+                content=ChatError(
+                    error="rate_limit",
+                    message="Too many requests. Please wait a moment and try again.",
+                    details=str(exc),
+                    retry_after=30
+                ).model_dump()
+            )
+        elif status_code >= 500:
+            # Upstream server error
+            return JSONResponse(
+                status_code=502,
+                content=ChatError(
+                    error="upstream_error",
+                    message="Our AI service is temporarily unavailable. Please try again shortly.",
+                    details=str(exc),
+                    retry_after=10
+                ).model_dump()
+            )
+        else:
+            return JSONResponse(
+                status_code=status_code,
+                content=ChatError(
+                    error="api_error",
+                    message="An error occurred while processing your request.",
+                    details=str(exc)
+                ).model_dump()
+            )
+    except ValidationError as exc:
+        # Pydantic validation errors
+        print(f"[chat] Validation error: {exc}")
+        return JSONResponse(
+            status_code=422,
+            content=ChatError(
+                error="validation_error",
+                message="There was an issue with the data format. Please try again.",
+                details=str(exc)
+            ).model_dump()
+        )
+    except SQLAlchemyError as exc:
+        # Database errors
+        print(f"[chat] Database error: {exc}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=503,
+            content=ChatError(
+                error="database_error",
+                message="We're having trouble saving your progress. Please try again.",
+                details=str(exc),
+                retry_after=5
+            ).model_dump()
+        )
+    except Exception as exc:
+        # Catch-all for unexpected errors
+        print(f"[chat] Unexpected error: {exc}")
+        traceback.print_exc()
+
+        # Check for common LLM error patterns in the message
+        error_msg = str(exc).lower()
+        if "api key" in error_msg or "authentication" in error_msg:
+            return JSONResponse(
+                status_code=500,
+                content=ChatError(
+                    error="configuration_error",
+                    message="There's a configuration issue. Please contact support.",
+                    details=str(exc)
+                ).model_dump()
+            )
+        elif "rate limit" in error_msg or "quota" in error_msg:
+            return JSONResponse(
+                status_code=429,
+                content=ChatError(
+                    error="rate_limit",
+                    message="Service is busy. Please try again in a few seconds.",
+                    details=str(exc),
+                    retry_after=15
+                ).model_dump()
+            )
+        elif "timeout" in error_msg or "timed out" in error_msg:
+            return JSONResponse(
+                status_code=504,
+                content=ChatError(
+                    error="timeout",
+                    message="The request took too long. Please try again.",
+                    details=str(exc),
+                    retry_after=5
+                ).model_dump()
+            )
+        else:
+            return JSONResponse(
+                status_code=500,
+                content=ChatError(
+                    error="internal_error",
+                    message="Something went wrong. Please try again.",
+                    details=str(exc)
+                ).model_dump()
+            )
 
     # Convert message objects (HumanMessage/AIMessage) to plain dicts for JSON
     serializable_state: Dict[str, Any] = dict(new_state)

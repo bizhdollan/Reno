@@ -26,7 +26,10 @@ ImageSubState = Literal[
     "analyzing",              # Processing uploaded images - extract all data
     "confirming_extraction",  # User reviews/corrects ALL extracted data at once
     "collecting_vision",      # OPTIONAL: collect user's renovation vision/ideas
+    "design_conversation",    # Flexible conversation: confirm, correct, vision, suggestions, questions
+    "selecting_suggestions",  # User selecting from AI-generated options
     "generating",             # Generate proposal/preview image
+    "generating_parallel",    # Generate multiple options in parallel
     "confirming_proposal"     # User reviews generated image
 ]
 
@@ -111,7 +114,28 @@ class ProjectState(TypedDict, total=False):
     # Generated preview image
     generated_image_url: str | None
     image_generation_feedback: list[str]
-    
+
+    # Image generation state (for regeneration support)
+    generation_prompt: str | None
+    generation_description: str | None
+    original_image_urls: list[str] | None
+    last_generated_image_url: str | None  # For iterative refinement
+
+    # Image history tracking (position, url, description, user satisfaction)
+    generated_image_history: list[dict] | None  # [{url, description, position, base_perspective, user_satisfied}]
+    selected_final_image_url: str | None  # Image user confirmed for final review
+
+    # Original image features to retain during regeneration
+    original_features_to_retain: list[str] | None  # ["2 windows on east wall", "wooden door", ...]
+    brief_room_summary: str | None  # Short 2-3 line description for conversational flow
+
+    # Expert suggestions flow
+    expertise_level: str | None  # "expert" | "intermediate" | "novice"
+    pending_suggestions: list[dict] | None  # AI-generated options waiting for selection
+    selected_options_for_generation: list[dict] | None  # Options selected for parallel generation
+    generated_options: list[dict] | None  # Results from parallel generation
+    pending_feedback: str | None  # Feedback awaiting clarification (style_change vs refinement)
+
     # Cost estimation (stage 4)
     cost_tiers: list[CostTier] | None
     selected_tier: str | None
@@ -138,6 +162,23 @@ def create_initial_state() -> ProjectState:
         renovation_vision=None,
         generated_image_url=None,
         image_generation_feedback=[],
+        # Image generation state
+        generation_prompt=None,
+        generation_description=None,
+        original_image_urls=None,
+        last_generated_image_url=None,
+        # Image history and features
+        generated_image_history=[],
+        selected_final_image_url=None,
+        original_features_to_retain=None,
+        brief_room_summary=None,
+        # Expert suggestions flow
+        expertise_level=None,
+        pending_suggestions=None,
+        selected_options_for_generation=None,
+        generated_options=None,
+        pending_feedback=None,
+        # Cost estimation
         cost_tiers=None,
         selected_tier=None,
         user_confirmed_continue=False,
