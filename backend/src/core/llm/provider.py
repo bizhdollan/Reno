@@ -1,6 +1,7 @@
 import os
 import re
 from typing import AsyncGenerator, Optional, Any
+from uuid import uuid4
 import litellm
 from litellm import acompletion
 
@@ -9,6 +10,39 @@ from src.config import get_llm_config, get_vlm_config, get_vgm_config, LLMConfig
 
 # supported image formats across all providers (openai, anthropic, gemini)
 SUPPORTED_IMAGE_FORMATS = ["image/jpeg", "image/png", "image/webp"]
+
+
+# =============================================================================
+# PRICING CONFIGURATION (per 1M tokens)
+# =============================================================================
+MODEL_PRICING = {
+    # OpenAI
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "gpt-4-vision-preview": {"input": 10.00, "output": 30.00},
+    "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+    "gpt-4": {"input": 30.00, "output": 60.00},
+    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+
+    # Anthropic
+    "claude-3-opus-20240229": {"input": 15.00, "output": 75.00},
+    "claude-3-sonnet-20240229": {"input": 3.00, "output": 15.00},
+    "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
+    "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
+
+    # Google Gemini
+    "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+    "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},
+    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini/gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+    "gemini/gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini/gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},
+    "gemini/gemini-2.5-flash-preview-05-20": {"input": 0.075, "output": 0.30},
+
+    # Default fallback
+    "default": {"input": 1.00, "output": 2.00},
+}
 
 
 class UnsupportedImageFormatError(ValueError):
@@ -54,7 +88,7 @@ class LLMProvider:
     
     def _set_api_key_env(self) -> None:
         provider_lower = self.provider.lower()
-        
+
         if provider_lower == "openai":
             os.environ["OPENAI_API_KEY"] = self.api_key
         elif provider_lower == "anthropic":
@@ -63,6 +97,66 @@ class LLMProvider:
             os.environ["GOOGLE_API_KEY"] = self.api_key
         else:
             os.environ["LLM_API_KEY"] = self.api_key
+
+    def _calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
+        """
+        Calculate cost in USD for an API call.
+
+        Args:
+            input_tokens: Number of input/prompt tokens
+            output_tokens: Number of output/completion tokens
+
+        Returns:
+            Cost in USD (with 6 decimal precision)
+        """
+        # Get pricing for this model
+        pricing = MODEL_PRICING.get(self.model, MODEL_PRICING.get("default"))
+
+        # Calculate cost (pricing is per 1M tokens)
+        input_cost = (input_tokens * pricing["input"]) / 1_000_000
+        output_cost = (output_tokens * pricing["output"]) / 1_000_000
+        total_cost = round(input_cost + output_cost, 6)
+
+        return total_cost
+
+    async def _log_cost(
+        self,
+        api_call_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+        operation_type: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> None:
+        """
+        Log LLM cost to database.
+
+        This is a best-effort logging - failures don't break the main flow.
+        """
+        try:
+            from src.db.database import SessionLocal
+            from src.db.models import LLMCost
+            from uuid import UUID
+
+            db = SessionLocal()
+            try:
+                cost_record = LLMCost(
+                    api_call_id=UUID(api_call_id) if api_call_id else None,
+                    project_id=UUID(project_id) if project_id else None,
+                    model=self.model,
+                    operation_type=operation_type,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost=cost_usd,  # Legacy column
+                    cost_usd=cost_usd  # New precise column
+                )
+                db.add(cost_record)
+                db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            # Log but don't fail
+            print(f"[LLM Cost Tracking] Failed to log cost: {e}")
     
     def _validate_messages(self, messages: list[dict]) -> None:
         for message in messages:
@@ -102,10 +196,29 @@ class LLMProvider:
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 1000,
+        operation_type: Optional[str] = None,
+        project_id: Optional[str] = None,
         **kwargs: Any
     ) -> str:
+        """
+        Complete a chat message with the LLM.
+
+        Args:
+            messages: List of message dicts with role and content
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens in response
+            operation_type: Optional label for cost tracking (e.g., "analysis", "generation")
+            project_id: Optional project UUID for cost tracking
+            **kwargs: Additional LiteLLM parameters
+
+        Returns:
+            The completion text
+        """
         self._validate_messages(messages)
-        
+
+        # Generate unique call ID for tracking
+        api_call_id = str(uuid4())
+
         try:
             response = await acompletion(
                 model=self.model,
@@ -115,18 +228,31 @@ class LLMProvider:
                 stream=False,
                 **kwargs
             )
-            
+
             # Extract the completion text
             content = response.choices[0].message.content
-            
-            # Log token usage if available
+
+            # Log token usage and cost if available
             if hasattr(response, 'usage') and response.usage:
-                print(f"[LLM Usage] Prompt tokens: {response.usage.prompt_tokens}, "
-                      f"Completion tokens: {response.usage.completion_tokens}, "
-                      f"Total: {response.usage.total_tokens}")
-            
+                input_tokens = response.usage.prompt_tokens
+                output_tokens = response.usage.completion_tokens
+                cost_usd = self._calculate_cost(input_tokens, output_tokens)
+
+                print(f"[LLM Usage] {self.model} | {operation_type or 'unknown'} | "
+                      f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
+
+                # Log to database (async, non-blocking)
+                await self._log_cost(
+                    api_call_id=api_call_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                    operation_type=operation_type,
+                    project_id=project_id
+                )
+
             return content
-            
+
         except Exception as e:
             raise LLMProviderError(f"LLM completion failed: {str(e)}") from e
     
@@ -166,9 +292,15 @@ class LLMProvider:
         tools: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 1000,
+        operation_type: Optional[str] = None,
+        project_id: Optional[str] = None,
         **kwargs: Any
     ):
+        """Complete with function/tool calling support."""
         self._validate_messages(messages)
+
+        # Generate unique call ID for tracking
+        api_call_id = str(uuid4())
 
         try:
             response = await acompletion(
@@ -180,10 +312,25 @@ class LLMProvider:
                 stream=False,
                 **kwargs
             )
+
+            # Log token usage and cost
             if hasattr(response, 'usage') and response.usage:
-                print(f"[LLM Usage] Prompt tokens: {response.usage.prompt_tokens}, "
-                      f"Completion tokens: {response.usage.completion_tokens}, "
-                      f"Total: {response.usage.total_tokens}")
+                input_tokens = response.usage.prompt_tokens
+                output_tokens = response.usage.completion_tokens
+                cost_usd = self._calculate_cost(input_tokens, output_tokens)
+
+                print(f"[LLM Usage] {self.model} | {operation_type or 'tools'} | "
+                      f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
+
+                await self._log_cost(
+                    api_call_id=api_call_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                    operation_type=operation_type or "tools",
+                    project_id=project_id
+                )
+
             return response
         except Exception as e:
             raise LLMProviderError(f"LLM completion with tools failed: {str(e)}") from e
@@ -221,12 +368,22 @@ class LLMProvider:
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        operation_type: Optional[str] = None,
+        project_id: Optional[str] = None,
         **kwargs: Any
     ) -> dict:
         """
         Generate an image using a vision generation model (e.g., Gemini 2.5 Flash Image).
 
         The model returns BOTH text description and image.
+
+        Args:
+            messages: List of message dicts with role and content
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens in response
+            operation_type: Optional label for cost tracking
+            project_id: Optional project UUID for cost tracking
+            **kwargs: Additional parameters
 
         Returns:
             dict with keys:
@@ -236,6 +393,9 @@ class LLMProvider:
                 - description: str (text description of changes made)
         """
         self._validate_messages(messages)
+
+        # Generate unique call ID for tracking
+        api_call_id = str(uuid4())
 
         try:
             response = await acompletion(
@@ -322,11 +482,23 @@ class LLMProvider:
                 base64_string = base64.b64encode(image_data).decode('utf-8')
                 image_data_url = f"data:{mime_type};base64,{base64_string}"
 
-            # Log token usage if available
+            # Log token usage and cost
             if hasattr(response, 'usage') and response.usage:
-                print(f"[VGM Usage] Prompt tokens: {response.usage.prompt_tokens}, "
-                      f"Completion tokens: {response.usage.completion_tokens}, "
-                      f"Total: {response.usage.total_tokens}")
+                input_tokens = response.usage.prompt_tokens
+                output_tokens = response.usage.completion_tokens
+                cost_usd = self._calculate_cost(input_tokens, output_tokens)
+
+                print(f"[VGM Usage] {self.model} | {operation_type or 'image_generation'} | "
+                      f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
+
+                await self._log_cost(
+                    api_call_id=api_call_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_usd=cost_usd,
+                    operation_type=operation_type or "image_generation",
+                    project_id=project_id
+                )
 
             return {
                 "image_data": image_data,

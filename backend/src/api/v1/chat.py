@@ -12,7 +12,7 @@ import httpx
 
 from src.core.langgraph import create_initial_state, run_conversation
 from src.core.langgraph.graph import get_message_content
-from src.core.langgraph.state import ProjectState
+from src.core.langgraph.state import ProjectState, get_thinking_status, get_stage_progress
 from src.db.database import get_db
 from src.db.models import Project, ConversationState
 from src.utils.token_generator import generate_token
@@ -51,6 +51,14 @@ class ChatResponse(BaseModel):
     state: ProjectState = Field(..., description="Updated project state after this turn")
     project_id: str = Field(..., description="Canonical project token (PRJ-XXXXXX)")
     internal_id: str = Field(..., description="Internal project UUID for draft tracking")
+    thinking_status: str = Field(
+        default="Processing...",
+        description="User-friendly status for thinking animation"
+    )
+    stage_progress: dict = Field(
+        default_factory=dict,
+        description="Stage progress info for frontend progress bar"
+    )
 
 
 @router.get("/conversation/{id_or_token}")
@@ -389,13 +397,21 @@ async def chat(
     
     # Attach project_id/token to state for frontend convenience
     serializable_state["project_id"] = project_id
+    # Attach internal UUID for service operations (DB queries)
+    serializable_state["internal_project_id"] = str(project.id)
 
     db.commit()
     print(f"[chat] Saved to database: project_status={project.status}")
+
+    # Get thinking status and stage progress for frontend
+    thinking_status = get_thinking_status(serializable_state)
+    stage_progress = get_stage_progress(serializable_state)
 
     return ChatResponse(
         assistant=assistant_reply,
         state=serializable_state,
         project_id=project_id,
         internal_id=str(project.id),
+        thinking_status=thinking_status,
+        stage_progress=stage_progress,
     )

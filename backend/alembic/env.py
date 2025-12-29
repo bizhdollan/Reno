@@ -13,7 +13,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Import Base and all models
 from src.db.database import Base
-from src.db.models import Project, Unlock, ConversationState, LLMCost
+from src.db.models import (
+    Project,
+    Unlock,
+    ConversationState,
+    LLMCost,
+    # New tables for image analysis & generation refactor
+    ImageAnalysis,
+    ImageMetadata,
+    GenerationHistory,
+    BudgetContext,
+    CorrectionHistory,
+    PerspectiveChange,
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

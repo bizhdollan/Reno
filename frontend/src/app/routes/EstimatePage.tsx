@@ -314,25 +314,94 @@ const ProgressBar = memo(function ProgressBar({ currentStage }: { currentStage: 
 });
 
 // ==================== TYPING INDICATOR ====================
-function TypingIndicator() {
+function TypingIndicator({ status = "Processing..." }: { status?: string }) {
+  // Remove trailing "..." if present (we add our own animation)
+  const displayStatus = status.replace(/\.{3}$/, '');
+  const [displayedText, setDisplayedText] = useState("");
+  const [currentStatus, setCurrentStatus] = useState(displayStatus);
+
+  // Typewriter effect when status changes
+  useEffect(() => {
+    if (displayStatus !== currentStatus) {
+      setCurrentStatus(displayStatus);
+      setDisplayedText("");
+    }
+  }, [displayStatus, currentStatus]);
+
+  useEffect(() => {
+    if (displayedText.length < currentStatus.length) {
+      const timer = setTimeout(() => {
+        setDisplayedText(currentStatus.slice(0, displayedText.length + 1));
+      }, 30); // Typewriter speed
+      return () => clearTimeout(timer);
+    }
+  }, [displayedText, currentStatus]);
+
   return (
     <div className="flex items-center gap-2">
-      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-navy-600 to-navy-700 flex items-center justify-center">
+      {/* Animated avatar with pulse */}
+      <motion.div
+        className="w-8 h-8 rounded-full bg-gradient-to-br from-navy-600 to-navy-700 flex items-center justify-center relative"
+        animate={{ scale: [1, 1.05, 1] }}
+        transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+      >
         <Bot className="w-4 h-4 text-white" />
-      </div>
-      <div className="flex items-center gap-1.5 bg-white dark:bg-navy-800 rounded-2xl px-4 py-3 shadow-sm border border-navy-100 dark:border-navy-700">
-        <span className="text-navy-500 dark:text-navy-400 text-sm">Thinking</span>
-        <span className="flex gap-1">
+        {/* Subtle ring pulse */}
+        <motion.div
+          className="absolute inset-0 rounded-full border-2 border-navy-400"
+          animate={{ scale: [1, 1.3], opacity: [0.5, 0] }}
+          transition={{ duration: 1.5, repeat: Infinity, ease: "easeOut" }}
+        />
+      </motion.div>
+
+      <motion.div
+        className="flex items-center gap-2 bg-white dark:bg-navy-800 rounded-2xl px-4 py-3 shadow-sm border border-navy-100 dark:border-navy-700 relative overflow-hidden"
+        initial={{ opacity: 0, scale: 0.95, x: -10 }}
+        animate={{ opacity: 1, scale: 1, x: 0 }}
+        transition={{ duration: 0.3, ease: "easeOut" }}
+      >
+        {/* Subtle shimmer effect */}
+        <motion.div
+          className="absolute inset-0 bg-gradient-to-r from-transparent via-navy-100/30 dark:via-navy-600/20 to-transparent"
+          animate={{ x: ["-100%", "100%"] }}
+          transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+        />
+
+        {/* Typewriter text */}
+        <span className="text-navy-600 dark:text-navy-300 text-sm font-medium relative z-10 min-w-[120px]">
+          {displayedText}
+          {displayedText.length < currentStatus.length && (
+            <motion.span
+              animate={{ opacity: [1, 0] }}
+              transition={{ duration: 0.5, repeat: Infinity }}
+              className="text-amber-500"
+            >
+              |
+            </motion.span>
+          )}
+        </span>
+
+        {/* Animated dots */}
+        <span className="flex gap-1 relative z-10">
           {[0, 1, 2].map((i) => (
             <motion.span
               key={i}
-              animate={{ y: [0, -4, 0] }}
-              transition={{ duration: 0.6, repeat: Infinity, delay: i * 0.15 }}
+              animate={{
+                y: [0, -5, 0],
+                scale: [1, 1.2, 1],
+                backgroundColor: ["#f59e0b", "#fbbf24", "#f59e0b"]
+              }}
+              transition={{
+                duration: 0.8,
+                repeat: Infinity,
+                delay: i * 0.2,
+                ease: "easeInOut"
+              }}
               className="w-1.5 h-1.5 bg-amber-500 rounded-full"
             />
           ))}
         </span>
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -1340,6 +1409,7 @@ export default function EstimatePage() {
   const [pendingFiles, setPendingFiles] = useState<UploadedFile[]>([]);
   const [projectState, setProjectState] = useState<ProjectState | null>(null);
   const [isSending, setIsSending] = useState(false);
+  const [thinkingStatus, setThinkingStatus] = useState<string>("Processing...");
   const [error, setError] = useState<string | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -1497,6 +1567,26 @@ export default function EstimatePage() {
     if (pendingFiles.some((f) => f.uploading)) { setError("Please wait for uploads to complete"); return; }
 
     setIsSending(true); setError(null); setInput("");
+    // Set initial thinking status based on current stage
+    const stage = projectState?.current_stage || "project_basics";
+    const subState = projectState?.image_sub_state;
+    const statusMap: Record<string, string> = {
+      "project_basics": "Getting your project details...",
+      "final_review": "Preparing your summary...",
+      "cost_estimation": "Calculating your estimate...",
+      // Sub-states for image_analysis_generation
+      "analyzing": "Analyzing your room...",
+      "confirming_extraction": "Reviewing extracted details...",
+      "design_conversation": "Understanding your vision...",
+      "generating": "Creating your renovation preview...",
+      "generating_parallel": "Creating multiple previews...",
+      "confirming_proposal": "Reviewing your design...",
+    };
+    if (stage === "image_analysis_generation" && subState) {
+      setThinkingStatus(statusMap[subState] || "Processing...");
+    } else {
+      setThinkingStatus(statusMap[stage] || "Processing...");
+    }
     let messageContent: string | MessageContent[] = messageText;
     let displayContent: string | MessageContent[] = messageText;
 
@@ -1562,6 +1652,10 @@ export default function EstimatePage() {
         setProjectId(data.state.project_id);
       }
       setProjectState(data.state);
+      // Update thinking status from response for next request
+      if (data.thinking_status) {
+        setThinkingStatus(data.thinking_status);
+      }
       setMessages((prev) => [...prev, { role: "assistant", content: data.assistant || "(no response)", timestamp: new Date().toISOString() }]);
     } catch (err) {
       // Handle network errors (no connection, etc.)
@@ -1678,7 +1772,7 @@ export default function EstimatePage() {
             <AnimatePresence>
               {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onImageClick={setLightboxImage} />)}
             </AnimatePresence>
-            {isSending && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator /></motion.div>}
+            {isSending && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
             <div ref={messagesEndRef} />
           </div>
         </div>

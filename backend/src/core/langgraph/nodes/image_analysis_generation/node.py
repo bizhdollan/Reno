@@ -36,6 +36,13 @@ from src.core.langgraph.nodes.image_analysis_generation.analysis import (
     detect_features_to_retain,
 )
 
+# NEW: Service integration layer for DB-backed operations
+from src.core.langgraph.nodes.image_analysis_generation.node_services import (
+    ServiceIntegration,
+    should_use_services,
+    check_undo_request,
+)
+
 
 async def image_analysis_generation_node(state: ProjectState) -> dict:
     """
@@ -47,6 +54,10 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
     - collecting_vision: OPTIONAL - collect user's renovation vision
     - generating: Generate proposal/preview image
     - confirming_proposal: User reviews generated image
+
+    REFACTORED ARCHITECTURE:
+    When project_id is present, data is stored in DB via services.
+    Legacy state fields are maintained for backward compatibility.
     """
     sub_state = state.get("image_sub_state", "analyzing")
     messages = state.get("messages", [])
@@ -66,6 +77,21 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
         "image_analyses": image_analyses,
         "extracted_data": extracted_data,
     }
+
+    # NEW: Initialize service integration for DB-backed operations
+    # Use internal_project_id (UUID) for DB operations, fall back to project_id
+    internal_project_id = state.get("internal_project_id") or state.get("project_id")
+    services = ServiceIntegration(project_id=internal_project_id) if internal_project_id else None
+    use_services = await should_use_services(state)
+
+    # NEW: Check for undo request early
+    if user_message and use_services and await check_undo_request(user_message):
+        success, message = await services.handle_undo()
+        updates["messages"] = [{"role": "assistant", "content": message}]
+        updates["awaiting_user_input"] = True
+        if services:
+            services.cleanup()
+        return updates
 
     # Preserve generation-related state (critical for regeneration)
     if state.get("generated_image_url"):
@@ -146,6 +172,30 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
             room_vibe = summary_result.get("room_vibe", "current")
             updates["brief_room_summary"] = brief_summary
 
+            # NEW: Store analysis in DB when services available
+            if use_services and services:
+                try:
+                    for img_data in image_analyses:
+                        img_url = img_data.get("url")
+                        analysis_dict = img_data.get("analysis", {})
+
+                        # Store in DB via service
+                        db_analysis = await services.image_analysis.analyze_image(
+                            image_url=img_url,
+                            project_id=services.project_id,
+                            project_type=project_type
+                        )
+
+                        # Set first analysis as active
+                        if not updates.get("active_image_id"):
+                            updates["active_image_id"] = str(db_analysis.id)
+
+                    # Update conversation phase
+                    updates["conversation_phase"] = "ideating"
+                    print(f"[image_analysis] Stored {len(image_analyses)} analyses in DB")
+                except Exception as e:
+                    print(f"[image_analysis] DB storage failed (continuing with state): {e}")
+
             # Initialize empty image history
             updates["generated_image_history"] = []
 
@@ -175,50 +225,72 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
 
         updates["messages"] = [{"role": "assistant", "content": response}]
         updates["awaiting_user_input"] = True
+        if services:
+            services.cleanup()
         return updates
 
     # =========================================================================
     # DESIGN CONVERSATION STATE - Flexible conversation after extraction
     # =========================================================================
     elif sub_state in ["confirming_extraction", "collecting_vision", "design_conversation"]:
-        return await _handle_design_conversation(
+        result = await _handle_design_conversation(
             state, updates, user_message, project_type,
-            image_analyses, extracted_data, renovation_vision
+            image_analyses, extracted_data, renovation_vision,
+            services=services, use_services=use_services
         )
+        if services:
+            services.cleanup()
+        return result
 
     # =========================================================================
     # SELECTING SUGGESTIONS STATE
     # =========================================================================
     elif sub_state == "selecting_suggestions":
-        return await _handle_selecting_suggestions(state, updates, user_message, extracted_data, project_type)
+        result = await _handle_selecting_suggestions(state, updates, user_message, extracted_data, project_type)
+        if services:
+            services.cleanup()
+        return result
 
     # =========================================================================
     # GENERATING STATE - Generate proposal image(s)
     # =========================================================================
     elif sub_state == "generating":
-        return await _handle_generating(
-            state, updates, project_type, image_analyses, extracted_data, renovation_vision
+        result = await _handle_generating(
+            state, updates, project_type, image_analyses, extracted_data, renovation_vision,
+            services=services, use_services=use_services
         )
+        if services:
+            services.cleanup()
+        return result
 
     # =========================================================================
     # GENERATING PARALLEL STATE
     # =========================================================================
     elif sub_state == "generating_parallel":
-        return await _handle_generating_parallel(
+        result = await _handle_generating_parallel(
             state, updates, project_type, image_analyses, extracted_data
         )
+        if services:
+            services.cleanup()
+        return result
 
     # =========================================================================
     # CONFIRMING PROPOSAL STATE
     # =========================================================================
     elif sub_state == "confirming_proposal":
-        return await _handle_confirming_proposal(
-            state, updates, user_message, project_type, image_analyses, extracted_data, renovation_vision
+        result = await _handle_confirming_proposal(
+            state, updates, user_message, project_type, image_analyses, extracted_data, renovation_vision,
+            services=services, use_services=use_services
         )
+        if services:
+            services.cleanup()
+        return result
 
     # Fallback
     updates["messages"] = [{"role": "assistant", "content": "Something went wrong. Please try again."}]
     updates["awaiting_user_input"] = True
+    if services:
+        services.cleanup()
     return updates
 
 
@@ -229,12 +301,28 @@ async def _handle_design_conversation(
     project_type: str,
     image_analyses: list,
     extracted_data: dict,
-    renovation_vision: dict | None
+    renovation_vision: dict | None,
+    services: ServiceIntegration | None = None,
+    use_services: bool = False
 ) -> dict:
     """Handle the design conversation sub-state."""
     expertise_level = state.get("expertise_level", "novice")
 
     if user_message:
+        # NEW: Detect budget context if user mentions budget
+        budget_context = None
+        if use_services and services:
+            try:
+                budget_context = await services.detect_budget_if_mentioned(user_message)
+                if budget_context:
+                    print(f"[design_conversation] Budget context detected: {budget_context.get('sentiment')}")
+                    # Store in context_cache for generation phase
+                    context_cache = dict(state.get("context_cache", {}))
+                    context_cache["budget_context"] = budget_context
+                    updates["context_cache"] = context_cache
+            except Exception as e:
+                print(f"[design_conversation] Budget detection failed: {e}")
+
         # Check if user is selecting from pending suggestions
         pending_suggestions = state.get("pending_suggestions", [])
         if pending_suggestions:
@@ -256,6 +344,7 @@ async def _handle_design_conversation(
                     }
                     updates["pending_suggestions"] = []
                     updates["image_sub_state"] = "generating"
+                    updates["conversation_phase"] = "generating"  # NEW: Update conversation phase
                     updates["awaiting_user_input"] = False
                     updates["messages"] = []
                     return updates
@@ -263,6 +352,7 @@ async def _handle_design_conversation(
                     updates["selected_options_for_generation"] = selected_options
                     updates["pending_suggestions"] = []
                     updates["image_sub_state"] = "generating_parallel"
+                    updates["conversation_phase"] = "generating"  # NEW: Update conversation phase
                     updates["awaiting_user_input"] = False
                     updates["messages"] = []
                     return updates
@@ -293,9 +383,25 @@ async def _handle_design_conversation(
         # Handle corrections
         if primary_intent == "correction" or "correction" in secondary_intents:
             corrections = extracted_content.get("corrections") or user_message
-            corrected_data = await apply_user_correction(extracted_data, corrections, project_type)
-            updates["extracted_data"] = corrected_data
-            extracted_data = corrected_data
+
+            # NEW: Use correction service if available
+            if use_services and services:
+                try:
+                    corrected_data, _ = await services.handle_user_correction(
+                        user_message=corrections,
+                        current_data=extracted_data
+                    )
+                    updates["extracted_data"] = corrected_data
+                    extracted_data = corrected_data
+                except Exception as e:
+                    print(f"[design_conversation] Correction service failed, using legacy: {e}")
+                    corrected_data = await apply_user_correction(extracted_data, corrections, project_type)
+                    updates["extracted_data"] = corrected_data
+                    extracted_data = corrected_data
+            else:
+                corrected_data = await apply_user_correction(extracted_data, corrections, project_type)
+                updates["extracted_data"] = corrected_data
+                extracted_data = corrected_data
 
         # Handle based on primary intent
         if primary_intent == "confirm" or primary_intent == "mixed":
@@ -496,7 +602,9 @@ async def _handle_generating(
     project_type: str,
     image_analyses: list,
     extracted_data: dict,
-    renovation_vision: dict | None
+    renovation_vision: dict | None,
+    services: ServiceIntegration | None = None,
+    use_services: bool = False
 ) -> dict:
     """Handle the generating sub-state."""
     print("[image_analysis] Generating renovation preview image(s)...")
@@ -586,6 +694,33 @@ async def _handle_generating(
     updates["original_image_urls"] = original_image_urls
     updates["generated_image_history"] = image_history
     updates["image_sub_state"] = "confirming_proposal"
+    updates["conversation_phase"] = "reviewing"  # NEW: Update conversation phase
+
+    # NEW: Store generation in DB when services available
+    if use_services and services and generated_url and not updates.get("_generation_error"):
+        try:
+            from uuid import UUID
+
+            # Get active image analysis ID
+            active_image_id = state.get("active_image_id")
+            if active_image_id:
+                # Get budget context if available
+                context_cache = state.get("context_cache", {})
+                budget_context = context_cache.get("budget_context", {})
+
+                # Store generation history
+                gen_record = await services.generation.generate_initial(
+                    image_analysis_id=UUID(active_image_id),
+                    vision=renovation_vision.get("raw_input", "") if renovation_vision else "",
+                    critical_elements={"features_to_retain": features_to_retain},
+                    perspective_constraint=""
+                )
+
+                # Update active generation ID
+                updates["active_generation_id"] = str(gen_record.id)
+                print(f"[_handle_generating] Stored generation in DB: {gen_record.id}")
+        except Exception as e:
+            print(f"[_handle_generating] DB storage failed (continuing): {e}")
 
     # Build response
     error_note = ""
@@ -695,7 +830,9 @@ async def _handle_confirming_proposal(
     project_type: str,
     image_analyses: list,
     extracted_data: dict,
-    renovation_vision: dict | None
+    renovation_vision: dict | None,
+    services: ServiceIntegration | None = None,
+    use_services: bool = False
 ) -> dict:
     """Handle the confirming proposal sub-state."""
     image_history = list(state.get("generated_image_history", []))
@@ -703,59 +840,44 @@ async def _handle_confirming_proposal(
     features_to_retain = state.get("original_features_to_retain", [])
 
     # Check for pending regeneration from final_review
+    # When final_review sends back with _pending_regeneration, it has already
+    # determined this is a change request, so we skip re-classification and
+    # go directly to regeneration to avoid infinite loops
     pending_regeneration = state.get("_pending_regeneration")
     if pending_regeneration:
-        print(f"[confirming_proposal] Handling pending regeneration: {pending_regeneration}")
-        user_message = pending_regeneration
+        print(f"[confirming_proposal] Handling pending regeneration from final_review: {pending_regeneration}")
         updates["_pending_regeneration"] = None
+        # Directly handle as a regeneration request - final_review already classified this
+        conv_type = {
+            "conversation_type": "generation_request",
+            "confidence": 1.0,
+            "generation_changes": pending_regeneration
+        }
+        return await _handle_regeneration(
+            state, updates, pending_regeneration, conv_type, project_type,
+            image_analyses, extracted_data, renovation_vision,
+            image_history, features_to_retain,
+            services=services, use_services=use_services
+        )
 
     if user_message:
-        msg_lower = user_message.lower().strip()
+        # Use LLM-based classification for all user messages - no hardcoded keywords
+        context = f"User is reviewing a generated renovation preview with {len(image_history)} generated images."
+        unified_result = await unified_classify(
+            user_message=user_message,
+            context=context,
+            has_generated_images=len(image_history) > 0
+        )
+        conversation_type = unified_result.get("conversation_type", "clarify")
+        conv_type = {
+            "conversation_type": conversation_type,
+            "confidence": unified_result.get("confidence", 0.5),
+            "extracted_question": unified_result.get("extracted_content", {}).get("questions", [None])[0] if unified_result.get("extracted_content", {}).get("questions") else None,
+            "referenced_image_position": unified_result.get("extracted_content", {}).get("referenced_image_position"),
+            "generation_changes": unified_result.get("extracted_content", {}).get("generation_changes")
+        }
 
-        # Quick keyword-based pre-check
-        change_keywords = [
-            "should be", "should have", "add ", "change ", "make it", "make the",
-            "i want", "put ", "use ", "replace", "remove ", "tiles", "marble",
-            "wood", "carpet", "paint", "color", "darker", "lighter", "bigger",
-            "smaller", "modern", "traditional", "floor", "wall", "ceiling",
-            "let's add", "lets add", "can you add", "give me", "show me with"
-        ]
-        approval_keywords = [
-            "looks good", "look good", "perfect", "continue", "proceed",
-            "i'm happy", "im happy", "that's good", "thats good", "great",
-            "love it", "like it", "yes", "ok", "okay", "done", "finish"
-        ]
-
-        is_obvious_change = any(kw in msg_lower for kw in change_keywords)
-        is_pure_approval = any(kw in msg_lower for kw in approval_keywords) and not is_obvious_change
-
-        if is_obvious_change:
-            conversation_type = "generation_request"
-            conv_type = {
-                "conversation_type": "generation_request",
-                "confidence": 0.95,
-                "generation_changes": user_message
-            }
-        elif is_pure_approval:
-            conversation_type = "move_forward"
-            conv_type = {"conversation_type": "move_forward", "confidence": 0.95}
-        else:
-            context = f"User is reviewing a generated renovation preview with {len(image_history)} generated images."
-            unified_result = await unified_classify(
-                user_message=user_message,
-                context=context,
-                has_generated_images=len(image_history) > 0
-            )
-            conversation_type = unified_result.get("conversation_type", "clarify")
-            conv_type = {
-                "conversation_type": conversation_type,
-                "confidence": unified_result.get("confidence", 0.5),
-                "extracted_question": unified_result.get("extracted_content", {}).get("questions", [None])[0] if unified_result.get("extracted_content", {}).get("questions") else None,
-                "referenced_image_position": unified_result.get("extracted_content", {}).get("referenced_image_position"),
-                "generation_changes": unified_result.get("extracted_content", {}).get("generation_changes")
-            }
-
-        print(f"[confirming_proposal] Conversation type: {conversation_type}")
+        print(f"[confirming_proposal] Conversation type: {conversation_type} (confidence: {conv_type['confidence']})")
 
         if conversation_type == "discussion":
             question = conv_type.get("extracted_question") or user_message
@@ -801,6 +923,8 @@ async def _handle_confirming_proposal(
                 updates["generated_image_history"] = image_history
             updates["selected_final_image_url"] = current_generated_url
             updates["current_stage"] = "final_review"
+            # Flag to tell final_review to show summary first (don't process user message)
+            updates["_show_final_review_summary"] = True
             updates["awaiting_user_input"] = False
             updates["messages"] = []
             return updates
@@ -809,7 +933,8 @@ async def _handle_confirming_proposal(
             return await _handle_regeneration(
                 state, updates, user_message, conv_type, project_type,
                 image_analyses, extracted_data, renovation_vision,
-                image_history, features_to_retain
+                image_history, features_to_retain,
+                services=services, use_services=use_services
             )
 
         else:
@@ -840,7 +965,9 @@ async def _handle_regeneration(
     extracted_data: dict,
     renovation_vision: dict | None,
     image_history: list,
-    features_to_retain: list
+    features_to_retain: list,
+    services: ServiceIntegration | None = None,
+    use_services: bool = False
 ) -> dict:
     """Handle image regeneration based on user feedback."""
     raw_feedback = conv_type.get("generation_changes") or user_message
@@ -869,8 +996,24 @@ async def _handle_regeneration(
 
     # Single image regeneration
     current_description = state.get("generation_description", "")
-    mode_result = await detect_regeneration_mode(feedback_content, current_description)
-    regen_mode = mode_result.get("mode", "iterative_refinement")
+
+    # NEW: Use sentiment service for regeneration mode detection if available
+    if use_services and services:
+        try:
+            regen_mode, regions = await services.classify_regeneration_intent(feedback_content)
+            # Map service result to legacy mode format
+            if regen_mode == "restart":
+                regen_mode = "style_change"
+            elif regen_mode == "additive":
+                regen_mode = "iterative_refinement"
+            print(f"[_handle_regeneration] Service detected mode: {regen_mode}, regions: {regions}")
+        except Exception as e:
+            print(f"[_handle_regeneration] Sentiment service failed, using legacy: {e}")
+            mode_result = await detect_regeneration_mode(feedback_content, current_description)
+            regen_mode = mode_result.get("mode", "iterative_refinement")
+    else:
+        mode_result = await detect_regeneration_mode(feedback_content, current_description)
+        regen_mode = mode_result.get("mode", "iterative_refinement")
 
     if regen_mode == "ask_user":
         display_feedback = feedback_content[:200] + "..." if len(feedback_content) > 200 else feedback_content
