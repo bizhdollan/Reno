@@ -22,4 +22,6 @@ __all__ = [
     "GenerationService",
     "SentimentService",
     "CorrectionService",
+    "location_service",
+    "renovation_inspiration_service",
 ]

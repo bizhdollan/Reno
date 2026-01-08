@@ -331,3 +331,6 @@ backend/images
 plan.md
 different_plan.md
 latest_idea.md
+*.json
+tavily_cleaned_content/
+tavily_raw_content/

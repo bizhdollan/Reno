@@ -1,5 +1,8 @@
 import asyncio
 import json
+import logging
+from enum import Enum
+from datetime import datetime, timedelta
 
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.state import (
@@ -8,6 +11,8 @@ from src.core.langgraph.state import (
 )
 from src.core.langgraph.utils import get_latest_user_message
 from src.core.langgraph.config import VISION_PROMPT
+from src.db.database import SessionLocal
+from src.db.models import Project
 
 # Import from split modules
 from src.core.langgraph.nodes.image_analysis_generation.image_helpers import (
@@ -42,6 +47,93 @@ from src.core.langgraph.nodes.image_analysis_generation.node_services import (
     should_use_services,
     check_undo_request,
 )
+
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+# State constants
+class ImageSubState(str, Enum):
+    """Image analysis sub-states."""
+    ANALYZING = "analyzing"
+    CONFIRMING_EXTRACTION = "confirming_extraction"
+    COLLECTING_VISION = "collecting_vision"
+    DESIGN_CONVERSATION = "design_conversation"
+    SELECTING_SUGGESTIONS = "selecting_suggestions"
+    GENERATING = "generating"
+    GENERATING_PARALLEL = "generating_parallel"
+    CONFIRMING_PROPOSAL = "confirming_proposal"
+
+# Timeout configuration (in seconds)
+IMAGE_GENERATION_TIMEOUT = 90.0  # 90 seconds for image generation operations
+INSPIRATION_WAIT_TIMEOUT = 30.0  # 30 seconds max wait for inspirations
+INSPIRATION_RETRY_INTERVAL = 2.0  # Check every 2 seconds
+
+
+async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_seconds: float = INSPIRATION_WAIT_TIMEOUT) -> dict:
+    """
+    Retrieve renovation inspirations from database with wait/retry logic.
+
+    If inspirations are not available:
+    - Wait up to max_wait_seconds for background task to complete
+    - Check every INSPIRATION_RETRY_INTERVAL seconds
+    - If still not available after timeout, return None
+
+    Args:
+        project_id_token: Project token (PRJ-XXXXXX)
+        max_wait_seconds: Maximum time to wait for inspirations
+
+    Returns:
+        Inspirations dict if available, None otherwise
+    """
+    if not project_id_token:
+        return None
+
+    db = SessionLocal()
+    start_time = asyncio.get_event_loop().time()
+
+    try:
+        # Get project
+        project = db.query(Project).filter(Project.token == project_id_token).first()
+        if not project:
+            print(f"[inspirations] Project not found: {project_id_token}")
+            return None
+
+        # Check if inspirations already available
+        if project.renovation_inspirations:
+            print(f"[inspirations] Retrieved existing inspirations for {project_id_token}")
+            return project.renovation_inspirations
+
+        # Check if project was created recently (within last 60 seconds)
+        # If so, background task might still be running
+        if project.created_at and (datetime.utcnow() - project.created_at).total_seconds() < 60:
+            print(f"[inspirations] Project created recently, waiting for background task...")
+
+            # Wait with retries
+            elapsed = 0
+            while elapsed < max_wait_seconds:
+                await asyncio.sleep(INSPIRATION_RETRY_INTERVAL)
+                elapsed = asyncio.get_event_loop().time() - start_time
+
+                # Refresh and check again
+                db.refresh(project)
+                if project.renovation_inspirations:
+                    print(f"[inspirations] Inspirations became available after {elapsed:.1f}s")
+                    return project.renovation_inspirations
+
+                print(f"[inspirations] Still waiting... ({elapsed:.1f}s/{max_wait_seconds}s)")
+
+            print(f"[inspirations] Timeout reached, proceeding without inspirations")
+            return None
+        else:
+            # Project is old, background task likely failed or wasn't triggered
+            print(f"[inspirations] No inspirations available (project created {datetime.utcnow() - project.created_at if project.created_at else 'unknown'} ago)")
+            return None
+
+    except Exception as e:
+        print(f"[inspirations] Error retrieving inspirations: {e}")
+        return None
+    finally:
+        db.close()
 
 
 async def image_analysis_generation_node(state: ProjectState) -> dict:
@@ -437,11 +529,23 @@ async def _handle_design_conversation(
             current_state_summary = json.dumps(extracted_data, indent=2)[:800]
             user_prefs = renovation_vision.get("raw_input", "") if renovation_vision else ""
 
+            # Retrieve renovation inspirations from database with wait logic
+            project_id_token = state.get("project_id")
+            print(f"[design_conversation] Retrieving inspirations for {project_id_token}...")
+            inspirations = await get_renovation_inspirations_with_wait(project_id_token)
+
+            if inspirations:
+                location = inspirations.get("location", {})
+                print(f"[design_conversation] Using inspirations for {location.get('city', 'Unknown')}, {location.get('state_code', 'Unknown')}")
+            else:
+                print(f"[design_conversation] No inspirations available, generating generic suggestions")
+
             suggestions_result = await generate_expert_suggestions(
                 project_type=project_type,
                 current_state_summary=current_state_summary,
                 user_preferences=user_prefs,
-                expertise_level=expertise_level
+                expertise_level=expertise_level,
+                inspirations=inspirations
             )
 
             updates["pending_suggestions"] = suggestions_result.get("options", [])
@@ -751,29 +855,54 @@ async def _handle_generating_parallel(
     image_analyses: list,
     extracted_data: dict
 ) -> dict:
-    """Handle the generating parallel sub-state."""
+    """Handle the generating parallel sub-state - generates multiple styles from all perspectives."""
+
+    # Input validation
+    if not project_type:
+        logger.error("Missing project_type in _handle_generating_parallel")
+        updates["messages"] = [{"role": "assistant", "content": "Configuration error. Please restart the process."}]
+        updates["image_sub_state"] = ImageSubState.DESIGN_CONVERSATION
+        updates["awaiting_user_input"] = True
+        return updates
+
+    if not extracted_data:
+        logger.warning("No extracted_data available for parallel image generation")
+
     selected_options = state.get("selected_options_for_generation", [])
     original_image_urls = [img["url"] for img in image_analyses]
     features_to_retain = state.get("original_features_to_retain", [])
     image_history = list(state.get("generated_image_history", []))
 
     if not selected_options or not original_image_urls:
+        logger.warning(f"Missing data - options: {len(selected_options)}, images: {len(original_image_urls)}")
         response = "Unable to generate options. Please go back and select options again."
         updates["messages"] = [{"role": "assistant", "content": response}]
-        updates["image_sub_state"] = "design_conversation"
+        updates["image_sub_state"] = ImageSubState.DESIGN_CONVERSATION
         updates["awaiting_user_input"] = True
         return updates
 
-    print(f"[image_analysis] Generating {len(selected_options)} options in parallel...")
+    num_perspectives = len(original_image_urls)
+    num_options = len(selected_options)
+    total_generations = num_options * num_perspectives
 
-    async def generate_option(option, perspective_idx=0):
+    logger.info(f"[image_analysis] Generating {num_options} style options across {num_perspectives} perspectives (total: {total_generations} images)")
+
+    async def generate_option(option, perspective_idx):
+        """Generate a single style option from a specific perspective."""
         try:
+            # Validate perspective index
+            if perspective_idx >= len(original_image_urls):
+                raise ValueError(f"Invalid perspective_idx {perspective_idx}, only {len(original_image_urls)} images available")
+
             vision = {
                 "raw_input": f"Style: {option.get('style_name')}",
                 "ai_summary": option.get("description", ""),
                 "selected_option": option
             }
-            base_urls = [original_image_urls[perspective_idx]] if perspective_idx < len(original_image_urls) else original_image_urls
+
+            # Use the specific perspective image
+            base_urls = [original_image_urls[perspective_idx]]
+
             url, prompt, desc = await generate_renovation_image(
                 original_image_urls=base_urls,
                 project_type=project_type,
@@ -783,6 +912,7 @@ async def _handle_generating_parallel(
                 previous_prompt=None,
                 features_to_retain=features_to_retain,
             )
+
             return {
                 "style_name": option.get("style_name"),
                 "url": url,
@@ -792,16 +922,58 @@ async def _handle_generating_parallel(
                 "success": True
             }
         except Exception as e:
+            logger.error(
+                f"Failed to generate option '{option.get('style_name')}' for perspective {perspective_idx}: {str(e)}",
+                exc_info=True
+            )
             return {
                 "style_name": option.get("style_name"),
                 "url": get_placeholder_image_url(),
                 "description": f"Failed to generate: {e}",
                 "perspective": perspective_idx,
-                "success": False
+                "success": False,
+                "error": str(e)
             }
 
-    results = await asyncio.gather(*[generate_option(opt, 0) for opt in selected_options])
+    # Generate each style from ALL available perspectives
+    generation_tasks = [
+        generate_option(opt, perspective_idx)
+        for opt in selected_options
+        for perspective_idx in range(num_perspectives)
+    ]
 
+    # Execute all generations with timeout protection
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*generation_tasks),
+            timeout=IMAGE_GENERATION_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"Image generation timed out after {IMAGE_GENERATION_TIMEOUT}s")
+        updates["messages"] = [{"role": "assistant", "content": "Image generation timed out. Please try again with fewer options or perspectives."}]
+        updates["image_sub_state"] = ImageSubState.DESIGN_CONVERSATION
+        updates["awaiting_user_input"] = True
+        return updates
+
+    # Check for complete failure
+    successful_results = [r for r in results if r.get("success")]
+
+    if not successful_results:
+        logger.error("All image generation attempts failed")
+        response = "All image generation attempts failed. Please try again or adjust your selections."
+        updates["messages"] = [{"role": "assistant", "content": response}]
+        updates["image_sub_state"] = ImageSubState.DESIGN_CONVERSATION
+        updates["awaiting_user_input"] = True
+        return updates
+
+    # Log success/failure statistics
+    failed_count = len(results) - len(successful_results)
+    if failed_count > 0:
+        logger.warning(f"Partial failure: {failed_count}/{len(results)} generations failed")
+    else:
+        logger.info(f"Successfully generated all {len(results)} images")
+
+    # Add successful results to history
     for result in results:
         if result.get("success"):
             image_history = add_to_image_history(
@@ -815,7 +987,7 @@ async def _handle_generating_parallel(
     updates["generated_options"] = results
     updates["original_image_urls"] = original_image_urls
     updates["generated_image_history"] = image_history
-    updates["image_sub_state"] = "confirming_proposal"
+    updates["image_sub_state"] = ImageSubState.CONFIRMING_PROPOSAL
 
     response = _format_parallel_options_response(results)
     updates["messages"] = [{"role": "assistant", "content": response}]

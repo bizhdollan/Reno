@@ -222,23 +222,104 @@ async def generate_expert_suggestions(
     project_type: str,
     current_state_summary: str,
     user_preferences: str,
-    expertise_level: str
+    expertise_level: str,
+    inspirations: dict = None
 ) -> dict:
     """
     Generate 2-3 expert renovation suggestions based on current state.
+
+    Args:
+        project_type: Type of space being renovated
+        current_state_summary: Summary of extracted data from images
+        user_preferences: User's stated preferences/vision
+        expertise_level: User's expertise level (novice/intermediate/expert)
+        inspirations: Optional location-based renovation inspirations from database
 
     Returns:
         dict with keys: options (list), follow_up_message
     """
     provider = LLMProvider.for_llm()
 
+    # Format contractor knowledge context if available
+    if inspirations:
+        location = inspirations.get("location", {})
+        location_str = f"{location.get('city', 'Unknown')}, {location.get('state_abbr', 'Unknown')}"
+        contractor_knowledge = inspirations.get("contractor_knowledge", {})
+        budget_indicators = inspirations.get("budget_indicators", {})
+        climate = inspirations.get("climate", {})
+
+        # Format popular styles
+        styles = contractor_knowledge.get("popular_styles", [])
+        styles_str = "\n".join([
+            f"- {s['name']}: {s['description']}\n  Key elements: {', '.join(s.get('key_elements', []))}\n  Color palette: {', '.join(s.get('color_palette', []))}"
+            for s in styles[:7]  # Show all styles
+        ]) if styles else "No style data available"
+
+        # Format popular materials
+        materials = contractor_knowledge.get("popular_materials", [])
+        materials_str = "\n".join([
+            f"- {m['name']} ({m.get('category', 'unknown')}): {m['description']}\n  Pairs well with: {', '.join(m.get('pairs_well_with', []))}\n  Budget tier: {m.get('budget_tier', 'unknown')}\n  Maintenance: {m.get('maintenance', 'N/A')}"
+            for m in materials[:12]  # Show many materials
+        ]) if materials else "No material data available"
+
+        # Format budget expectations
+        budget_exp = contractor_knowledge.get("budget_expectations", [])
+        budget_str = "\n".join([
+            f"- {b['item']}: {b['insight']}"
+            for b in budget_exp[:5]
+        ]) if budget_exp else "No budget data available"
+
+        # Format timeline expectations
+        timeline_exp = contractor_knowledge.get("timeline_expectations", [])
+        timeline_str = "\n".join([
+            f"- {t['project_type']}: {t['duration']} ({t.get('notes', 'No notes')})"
+            for t in timeline_exp[:3]
+        ]) if timeline_exp else "No timeline data available"
+
+        # Format code requirements
+        code_req = contractor_knowledge.get("code_requirements", [])
+        code_str = "\n".join([f"- {req}" for req in code_req]) if code_req else "No specific code requirements found"
+
+        # Format customer examples
+        examples = contractor_knowledge.get("customer_project_examples", [])
+        examples_str = "\n".join([f"- {ex}" for ex in examples[:5]]) if examples else "No examples available"
+
+        contractor_knowledge_context = f"""
+Contractor Knowledge for {location_str}:
+Budget Tier: {budget_indicators.get('finish_tier', 'unknown')}
+Median Home Value: ${budget_indicators.get('median_home_value', 0):,}
+Temperature Range: {climate.get('temp_range_f', {}).get('min', 'N/A')}°F - {climate.get('temp_range_f', {}).get('max', 'N/A')}°F
+
+**Popular Styles in {location_str}:**
+{styles_str}
+
+**Popular Materials & Finishes:**
+{materials_str}
+
+**Real Customer Project Examples:**
+{examples_str}
+
+**Budget Expectations:**
+{budget_str}
+
+**Timeline Expectations:**
+{timeline_str}
+
+**Code Requirements:**
+{code_str}
+"""
+    else:
+        location_str = "Unknown Location"
+        contractor_knowledge_context = "No contractor knowledge available. Generate suggestions based on general best practices."
+
     prompt = EXPERT_SUGGESTIONS_PROMPT.format(
         project_type=project_type,
+        location_display=location_str,
         current_state_summary=current_state_summary,
         user_preferences=user_preferences or "None provided yet",
-        expertise_level=expertise_level
+        expertise_level=expertise_level,
+        contractor_knowledge_context=contractor_knowledge_context
     )
-
     response = await provider.complete(
         messages=[
             {
@@ -248,8 +329,12 @@ async def generate_expert_suggestions(
             {"role": "user", "content": prompt}
         ],
         temperature=0.7,
-        max_tokens=1500
+        max_tokens=1500,
+        operation_type="expert_suggestions"
     )
+    print("="*80)
+    print(response)
+    print("="*80)
 
     try:
         return parse_json(response)

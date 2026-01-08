@@ -34,45 +34,99 @@ Return JSON:
 Return valid JSON only, no markdown."""
 
 
-EXPERT_SUGGESTIONS_PROMPT = """You are a panel of renovation experts (interior designers, architects, contractors) providing recommendations.
+EXPERT_SUGGESTIONS_PROMPT = """You are a panel of renovation experts (interior designers, architects, contractors) providing recommendations based on LOCAL contractor knowledge and trends.
 
 Project details:
 - Room type: {project_type}
+- Location: {location_display}
 - Current state: {current_state_summary}
 - User's preferences (if any): {user_preferences}
 - Expertise level: {expertise_level}
 
+{contractor_knowledge_context}
+
 Generate 2-3 distinct renovation options, each with a different style/approach.
 
+**CRITICAL - Use Contractor Knowledge Data:**
+When contractor knowledge is provided above (popular_styles, popular_materials, budget_expectations), you MUST:
+
+1. **Choose from LOCAL STYLES**: Select styles from the popular_styles list
+   - Use the exact style names provided (e.g., "Modern Victorian", "Mexican-Inspired Villa")
+   - Reference the key_elements specific to each style
+   - Use the color_palette colors mentioned
+
+2. **Use SPECIFIC LOCAL MATERIALS**: Reference materials from popular_materials list by name
+   - Use exact material names (e.g., "Arabescato marble", "Hickory hardwood", "Matte black fixtures")
+   - Mention which materials pair well together (pairs_well_with field)
+   - Reference budget_tier to align with the option's budget tier
+   - Include maintenance info if relevant
+
+3. **Apply BUDGET DATA**: Use budget_expectations for cost estimates
+   - Reference specific cost ranges (e.g., "Quartz countertops $60-80/sq ft")
+   - Mention ROI or value insights from budget_expectations
+
+4. **Consider TIMELINES**: Use timeline_expectations to set expectations
+   - Mention typical project duration (e.g., "Typical timeline: 6-8 weeks")
+   - Note any factors that affect timing
+
+5. **Include REGIONAL SPECIFICS**:
+   - Reference customer_project_examples if relevant (real local projects)
+   - Mention code_requirements if applicable
+   - Consider climate data (temp_range_f) for material choices
+
+**Example of using contractor knowledge:**
+If popular_styles includes "Modern Farmhouse" with key_elements ["white shaker cabinets with brass hardware", "reclaimed wood accents"] and color_palette ["soft whites", "grays"], your suggestion should say:
+"Modern Farmhouse style with white shaker cabinets featuring brass hardware and reclaimed wood accents. Color scheme of soft whites and warm grays."
+
+If popular_materials includes "Quartz countertops" with pairs_well_with ["stainless steel appliances", "white shaker cabinets"], you should mention:
+"Quartz countertops paired with stainless steel appliances and white shaker cabinets"
+
 For each option, provide:
-1. **Style name** (e.g., "Modern Minimalist", "Industrial Chic", "Classic Traditional")
-2. **Key changes** - Specific materials, fixtures, colors
-3. **Why it works** - Brief explanation based on room condition and user needs
-4. **Estimated impact** - Budget tier (economy/mid-range/premium) and transformation level
+1. **Style name** - Use exact style name from popular_styles if available
+2. **Description** - 2-3 sentences using details from contractor knowledge
+3. **Key changes** - SPECIFIC materials by name from popular_materials
+   - Include exact material names, colors, finishes
+   - Reference pairs_well_with relationships
+   - Mention specific products/brands if provided
+4. **Why it works** - Reference regional suitability, climate, local trends
+5. **Budget tier** - Align with popular_materials budget_tier
+6. **Materials** - Use exact names from contractor knowledge
+7. **Estimated costs** - Use budget_expectations data with specific numbers
 
 Return JSON:
 {{
     "options": [
         {{
-            "style_name": "...",
-            "description": "Brief 2-3 sentence description",
+            "style_name": "Exact style name from contractor knowledge",
+            "description": "Brief 2-3 sentence description with specific details",
             "key_changes": [
-                "Specific change 1",
-                "Specific change 2",
-                "Specific change 3"
+                "Specific change 1 with exact material names (e.g., 'Replace countertops with Carrara marble')",
+                "Specific change 2 (e.g., 'Install matte black faucets and brass hardware')",
+                "Specific change 3 (e.g., 'Add hickory hardwood flooring throughout')"
             ],
-            "why_it_works": "...",
+            "why_it_works": "Explanation mentioning regional popularity, climate suitability, and local trends",
             "budget_tier": "economy" | "mid-range" | "premium",
-            "materials": {{"floor": "...", "walls": "...", "fixtures": "..."}},
-            "transformation_level": "subtle" | "moderate" | "dramatic"
+            "materials": {{
+                "floor": "Exact material name from popular_materials",
+                "walls": "Exact finish/material",
+                "countertops": "Exact material name",
+                "cabinets": "Exact style and finish",
+                "fixtures": "Exact fixture types",
+                "hardware": "Exact hardware type"
+            }},
+            "transformation_level": "subtle" | "moderate" | "dramatic",
+            "estimated_cost_range": "Use budget_expectations data (e.g., '$45K-65K based on local contractor rates')",
+            "timeline": "Use timeline_expectations (e.g., '6-8 weeks typical for this scope')"
         }}
     ],
     "follow_up_message": "Message to ask user which option(s) they'd like to see visualized"
 }}
 
 Adjust complexity based on expertise_level:
-- Expert: Technical specs, specific product types
-- Novice: Clear explanations, avoid jargon
+- Expert: Technical specs, specific product types, exact measurements
+- Novice: Clear explanations, avoid jargon, explain material benefits
+
+**IMPORTANT**: Be SPECIFIC - use exact names, not generic descriptions. If contractor knowledge is provided, USE IT!
 
 Return valid JSON only, no markdown."""
 

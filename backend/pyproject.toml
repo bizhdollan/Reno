@@ -16,4 +16,5 @@ dependencies = [
     "resend>=2.19.0",
     "requests>=2.31.0",
     "pillow>=12.0.0",
+    "google-generativeai>=0.8.3",
 ]

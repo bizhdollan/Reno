@@ -9,6 +9,10 @@ User can edit until they upload an image (which triggers stage transition).
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.state import ProjectState
 from src.core.langgraph.utils import get_latest_user_message, parse_json
+from src.core.services.location_service import validate_us_zip_code, extract_location_from_zip
+from src.core.services.renovation_inspiration_service import start_inspiration_retrieval_background
+from src.db.database import SessionLocal
+from src.db.models import Project
 
 
 SMART_EXTRACTION_PROMPT = """Extract project information from the user's message.
@@ -205,10 +209,40 @@ async def project_basics_node(state: ProjectState) -> dict:
     
     # Determine what to ask next
     missing = get_missing_fields({**state, **updates})
-    
+
     if not missing:
         # All fields complete - show summary
         ptype_for_msg = updates.get("project_type") or state.get("project_type", "space")
+        final_zip = updates.get("zip_code") or state.get("zip_code")
+        final_type = updates.get("project_type") or state.get("project_type")
+
+        # Start background task to retrieve renovation inspirations
+        # This runs asynchronously without blocking the user
+        project_id_token = state.get("project_id")
+        if project_id_token and final_zip and final_type:
+            # Validate zip code before starting background task
+            if validate_us_zip_code(final_zip):
+                # Get project UUID from database
+                try:
+                    db = SessionLocal()
+                    try:
+                        project = db.query(Project).filter(Project.token == project_id_token).first()
+                        if project:
+                            print(f"[project_basics] Starting renovation inspiration retrieval for {final_type} in {final_zip}")
+                            start_inspiration_retrieval_background(
+                                project_id=project.id,
+                                project_type=final_type,
+                                zip_code=final_zip
+                            )
+                        else:
+                            print(f"[project_basics] Project not found for token {project_id_token}")
+                    finally:
+                        db.close()
+                except Exception as e:
+                    print(f"[project_basics] Failed to start inspiration retrieval: {e}")
+            else:
+                print(f"[project_basics] Invalid zip code {final_zip}, skipping inspiration retrieval")
+
         response = (
             f"Here's what I have:\n\n"
             f"{format_summary({**state, **updates})}\n\n"

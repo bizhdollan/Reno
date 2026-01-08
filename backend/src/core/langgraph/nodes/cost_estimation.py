@@ -14,12 +14,12 @@ from src.core.langgraph.state import ProjectState, CostTier, CategoryBreakdown
 from src.core.langgraph.utils import get_latest_user_message, parse_json
 
 
-COST_ESTIMATION_PROMPT = """You are a renovation cost estimation expert. Generate a detailed 3-tier cost estimate for this project.
+COST_ESTIMATION_PROMPT = """You are a renovation cost estimation expert with LOCAL contractor knowledge. Generate a detailed 3-tier cost estimate for this project using SPECIFIC regional pricing data.
 
 ## Project Information
 
 **Type:** {project_type}
-**Location (Zip):** {zip_code}
+**Location:** {location}
 **Room Size:** {area_sqft} sq ft
 
 ## Current Space Details
@@ -35,31 +35,51 @@ COST_ESTIMATION_PROMPT = """You are a renovation cost estimation expert. Generat
 ## Renovation Vision
 {renovation_vision}
 
+{contractor_budget_context}
+
 ## Your Task
 
-Generate THREE cost tiers for this {project_type} renovation:
+Generate THREE cost tiers for this {project_type} renovation using the LOCAL pricing data above:
 
 1. **Low Tier** (Budget-Friendly)
+   - Use budget-tier materials from the popular_materials list
    - Standard quality materials
-   - Basic fixtures and finishes  
+   - Basic fixtures and finishes
    - ~20% markup on COGS
-   
+
 2. **Mid Tier** (Recommended)
+   - Use mid-tier materials from the popular_materials list
    - Good quality materials
    - Mid-range fixtures and finishes
    - ~35% markup on COGS
-   
+
 3. **High Tier** (Premium)
+   - Use upper-mid/luxury-tier materials from the popular_materials list
    - Top-tier materials
    - High-end fixtures and finishes
    - ~50% markup on COGS
 
+**CRITICAL - Use Local Pricing Data:**
+- MUST use specific prices from budget_expectations (e.g., "Quartz countertops $60-80/sq ft installed in Austin")
+- Reference exact material names from popular_materials (e.g., "Arabescato marble", "Hickory hardwood")
+- Use timeline_expectations for realistic project duration
+- Calculate costs based on actual local contractor rates provided
+
 For EACH tier, provide:
 - Detailed category breakdown (materials cost + labor cost per category)
+- Use SPECIFIC material names from popular_materials
+- Apply budget_tier filtering (budget-tier materials for Low, mid-tier for Mid, luxury for High)
+- Reference local pricing from budget_expectations
 - Categories should be relevant to {project_type} and the renovation vision
 - COGS (sum of all materials + labor)
 - Markup amount
 - Total cost
+
+**Example of using local data:**
+If budget_expectations shows "Quartz countertops $60-80/sq ft installed" and room is 150 sq ft, use:
+- Materials: $60-80/sq ft × area
+- Include installation labor in the rate
+- Match to mid-tier since quartz is listed as "mid" in popular_materials
 
 Return JSON only with this structure:
 {{
@@ -68,42 +88,47 @@ Return JSON only with this structure:
             "id": "low",
             "name": "Low Tier",
             "badge": "Budget-Friendly",
-            "description": "Quality work at the best value",
+            "description": "Quality work at the best value using budget-tier local materials",
             "detailed_breakdown": [
                 {{
-                    "category": "Flooring",
-                    "description": "Laminate flooring installation",
+                    "category": "Countertops",
+                    "description": "Specific material name from popular_materials (e.g., Vinyl countertops)",
                     "materials_cost": 1500,
                     "labor_cost": 800,
                     "total": 2300
                 }}
             ],
-            "included_items": ["Flooring", "Painting", "Fixtures", ...],
+            "included_items": ["List of materials from popular_materials"],
             "cogs": 8000,
             "markup_percentage": 20,
             "markup_amount": 1600,
-            "total_cost": 9600
+            "total_cost": 9600,
+            "timeline": "Duration from timeline_expectations"
         }},
         {{
             "id": "mid",
             "name": "Mid Tier",
             "badge": "Recommended",
-            "description": "Best balance of quality and price",
+            "description": "Best balance of quality and price with mid-tier local materials",
+            "timeline": "Duration from timeline_expectations",
             ...
         }},
         {{
-            "id": "high", 
+            "id": "high",
             "name": "High Tier",
             "badge": "Premium",
-            "description": "Top-tier materials and finishes",
+            "description": "Top-tier materials from local contractors (luxury/upper-mid tier)",
+            "timeline": "Duration from timeline_expectations",
             ...
         }}
     ]
 }}
 
-Be realistic with pricing based on the location (zip code) and current market rates.
-Consider the renovation vision when determining what work is included.
-Ensure Low < Mid < High tier pricing."""
+**IMPORTANT:**
+- Use EXACT pricing from budget_expectations where available
+- Reference SPECIFIC material names from popular_materials
+- Ensure Low < Mid < High tier pricing
+- Include timeline from timeline_expectations in each tier"""
 
 
 def format_materials_for_prompt(materials: list) -> str:
@@ -160,36 +185,93 @@ def format_vision_for_prompt(vision: dict | None) -> str:
     return "\n".join(lines) if lines else "No specific vision provided."
 
 
+def format_contractor_budget_context(inspirations: dict | None) -> str:
+    """Format contractor knowledge budget data for cost estimation."""
+    if not inspirations:
+        return "## Local Contractor Pricing\n\nNo regional pricing data available. Use general market rates for the zip code."
+
+    contractor_knowledge = inspirations.get("contractor_knowledge", {})
+    location = inspirations.get("location", {})
+    location_str = f"{location.get('city', 'Unknown')}, {location.get('state_abbr', 'XX')}"
+
+    # Format budget expectations
+    budget_exp = contractor_knowledge.get("budget_expectations", [])
+    budget_str = "\n".join([f"- {b['item']}: {b['insight']}" for b in budget_exp]) if budget_exp else "No specific pricing data available"
+
+    # Format materials with budget tiers
+    materials = contractor_knowledge.get("popular_materials", [])
+    materials_by_tier = {"budget": [], "mid": [], "upper-mid": [], "luxury": []}
+    for m in materials:
+        tier = m.get("budget_tier", "mid")
+        materials_by_tier.get(tier, materials_by_tier["mid"]).append(m)
+
+    budget_materials = "\n".join([f"  • {m['name']} ({m.get('category', 'unknown')}): {m.get('description', '')}" for m in materials_by_tier["budget"][:5]]) if materials_by_tier["budget"] else "  Use standard quality materials"
+    mid_materials = "\n".join([f"  • {m['name']} ({m.get('category', 'unknown')}): {m.get('description', '')}" for m in materials_by_tier["mid"][:5]]) if materials_by_tier["mid"] else "  Use mid-range quality materials"
+    luxury_materials = "\n".join([f"  • {m['name']} ({m.get('category', 'unknown')}): {m.get('description', '')}" for m in (materials_by_tier["upper-mid"] + materials_by_tier["luxury"])[:5]]) if (materials_by_tier["upper-mid"] + materials_by_tier["luxury"]) else "  Use premium quality materials"
+
+    # Format timelines
+    timeline_exp = contractor_knowledge.get("timeline_expectations", [])
+    timeline_str = "\n".join([f"- {t['project_type']}: {t['duration']} ({t.get('notes', 'No notes')})" for t in timeline_exp[:3]]) if timeline_exp else "No timeline data available"
+
+    return f"""## Local Contractor Pricing Data for {location_str}
+
+**Budget Expectations (Local Contractor Rates):**
+{budget_str}
+
+**Materials by Budget Tier:**
+
+Budget Tier (for Low estimate):
+{budget_materials}
+
+Mid Tier (for Mid estimate):
+{mid_materials}
+
+Luxury Tier (for High estimate):
+{luxury_materials}
+
+**Timeline Expectations:**
+{timeline_str}
+
+**Instructions:** Use these SPECIFIC local prices and materials when generating estimates. Reference exact material names and pricing."""
+
+
 async def generate_cost_tiers(state: ProjectState) -> list[CostTier]:
-    """Generate 3-tier cost estimates using AI."""
+    """Generate 3-tier cost estimates using AI with contractor knowledge."""
     provider = LLMProvider.for_llm()
-    
+
     extracted = state.get("extracted_data", {})
     measurements = extracted.get("measurements", {})
     vision = state.get("renovation_vision")
-    
+    inspirations = state.get("renovation_inspirations")
+
+    # Get location info
+    location = inspirations.get("location", {}) if inspirations else {}
+    location_str = f"{location.get('city', 'Unknown')}, {location.get('state_abbr', 'XX')}" if location else f"Zip {state.get('zip_code', 'unknown')}"
+
     prompt = COST_ESTIMATION_PROMPT.format(
         project_type=state.get("project_type", "renovation"),
-        zip_code=state.get("zip_code", "unknown"),
+        location=location_str,
         area_sqft=measurements.get("area_sqft", 100),
         materials=format_materials_for_prompt(extracted.get("materials", [])),
         measurements=format_measurements_for_prompt(measurements),
         style=extracted.get("style", {}).get("overall_style", "unknown"),
-        renovation_vision=format_vision_for_prompt(vision)
+        renovation_vision=format_vision_for_prompt(vision),
+        contractor_budget_context=format_contractor_budget_context(inspirations)
     )
-    
+
     response = await provider.complete(
         messages=[
             {
                 "role": "system",
-                "content": "You are a renovation cost estimator. Return valid JSON only, no markdown."
+                "content": "You are a renovation cost estimator using LOCAL contractor pricing data. Return valid JSON only, no markdown."
             },
             {"role": "user", "content": prompt}
         ],
         temperature=0.3,
-        max_tokens=3000
+        max_tokens=3000,
+        operation_type="cost_estimation"
     )
-    
+
     try:
         data = parse_json(response)
         return data.get("tiers", [])

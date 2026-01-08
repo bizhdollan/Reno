@@ -59,6 +59,7 @@ class Project(Base):
     extracted_data = Column(JSONB, nullable=True)  # Materials, measurements, etc.
     renovation_vision = Column(JSONB, nullable=True)  # Homeowner's vision/preferences
     generated_image_url = Column(Text, nullable=True)  # AI-generated preview image
+    renovation_inspirations = Column(JSONB, nullable=True)  # Location-based renovation ideas/inspirations
     
     # Completion tracking (two-party system)
     homeowner_marked_complete = Column(Boolean, default=False, nullable=False)
