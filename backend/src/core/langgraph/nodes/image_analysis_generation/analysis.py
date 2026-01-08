@@ -20,6 +20,10 @@ from src.core.langgraph.prompts import (
 from src.core.langgraph.nodes.image_analysis_generation.image_helpers import (
     load_image_as_base64,
 )
+from src.core.services.event_broadcaster import (
+    emit_analysis_progress,
+    emit_analysis_complete,
+)
 
 
 def build_image_analysis_prompt(project_type: str) -> str:
@@ -98,19 +102,45 @@ Return JSON:
 }}"""
 
 
-async def analyze_single_image(image_url: str, project_type: str, image_index: int) -> ImageAnalysis:
+async def analyze_single_image(
+    image_url: str,
+    project_type: str,
+    image_index: int,
+    total_images: int = 1,
+    project_id: str | None = None
+) -> ImageAnalysis:
     """Analyze a single image and return structured analysis."""
     print(f"[image_analysis] Starting analysis for image {image_index + 1}: {image_url}")
+
+    # Emit progress event
+    if project_id:
+        await emit_analysis_progress(
+            project_id=project_id,
+            image_index=image_index,
+            total_images=total_images,
+            step="loading_image",
+            details={"url": image_url}
+        )
 
     provider = LLMProvider.for_vlm()
     image_data_url = await load_image_as_base64(image_url)
     prompt = build_image_analysis_prompt(project_type)
 
+    # Emit extraction start
+    if project_id:
+        await emit_analysis_progress(
+            project_id=project_id,
+            image_index=image_index,
+            total_images=total_images,
+            step="extracting_data",
+            details={"categories": "materials, measurements, colors, fixtures, search_context"}
+        )
+
     response = await provider.complete(
         messages=[
             {
                 "role": "system",
-                "content": "You are a renovation expert. Analyze images thoroughly. Return JSON only, no markdown."
+                "content": "You are a renovation expert. Analyze images thoroughly and identify search-relevant context (era, style, problem areas). Return JSON only, no markdown."
             },
             {
                 "role": "user",
@@ -120,8 +150,8 @@ async def analyze_single_image(image_url: str, project_type: str, image_index: i
                 ]
             }
         ],
-        temperature=0.2,
-        max_tokens=2000
+        temperature=0.4,  # Increased from 0.2 for richer, more descriptive insights
+        max_tokens=2500   # Increased to accommodate new categories
     )
 
     try:
@@ -133,6 +163,16 @@ async def analyze_single_image(image_url: str, project_type: str, image_index: i
     categories_found = [k for k in analysis.keys() if analysis.get(k)]
     print(f"[image_analysis] Completed image {image_index + 1}: found {categories_found}")
 
+    # Emit completion for this image
+    if project_id:
+        await emit_analysis_progress(
+            project_id=project_id,
+            image_index=image_index,
+            total_images=total_images,
+            step="completed",
+            details={"categories_found": categories_found}
+        )
+
     return ImageAnalysis(
         url=image_url,
         index=image_index,
@@ -140,10 +180,21 @@ async def analyze_single_image(image_url: str, project_type: str, image_index: i
     )
 
 
-async def analyze_images_parallel(image_urls: list[str], project_type: str) -> list[ImageAnalysis]:
+async def analyze_images_parallel(
+    image_urls: list[str],
+    project_type: str,
+    project_id: str | None = None
+) -> list[ImageAnalysis]:
     """Analyze multiple images in parallel."""
+    total_images = len(image_urls)
     tasks = [
-        analyze_single_image(url, project_type, idx)
+        analyze_single_image(
+            image_url=url,
+            project_type=project_type,
+            image_index=idx,
+            total_images=total_images,
+            project_id=project_id
+        )
         for idx, url in enumerate(image_urls)
     ]
     results = await asyncio.gather(*tasks)
@@ -361,10 +412,16 @@ async def generate_brief_room_summary(
 
 async def detect_features_to_retain(image_url: str) -> dict:
     """
-    Analyze image to identify architectural features that must be preserved.
+    Analyze image to identify what's ACTUALLY VISIBLE and what should NOT be added.
+
+    This is CRITICAL for preventing VGM hallucination. The function returns:
+    - visible_elements: What's actually in the image (walls, floor, windows, doors, etc.)
+    - image_scope: Frame type (corner_view, wall_view, full_room), coverage percentage
+    - must_retain: Structural features to preserve
+    - must_not_add: Explicit list of things NOT to add during generation
 
     Returns:
-        dict with keys: must_retain_features (list), reasoning
+        dict with keys: visible_elements, image_scope, must_retain, must_not_add, reasoning
     """
     provider = LLMProvider.for_vlm()
     image_data_url = await load_image_as_base64(image_url)
@@ -373,7 +430,14 @@ async def detect_features_to_retain(image_url: str) -> dict:
         messages=[
             {
                 "role": "system",
-                "content": "You are an architect identifying structural/important features in rooms. Return JSON only."
+                "content": """You are an image analyst for renovation projects. Your task is to identify:
+1. What is ACTUALLY VISIBLE in this specific image frame
+2. What is NOT visible (and therefore should NOT be added during renovation)
+3. The scope/coverage of the image (corner view, partial wall, full room, etc.)
+
+Be CONSERVATIVE - if you cannot clearly see something, assume it's NOT there.
+Do NOT imagine or assume elements that might exist outside the visible frame.
+Return valid JSON only, no markdown."""
             },
             {
                 "role": "user",
@@ -384,13 +448,77 @@ async def detect_features_to_retain(image_url: str) -> dict:
             }
         ],
         temperature=0.2,
-        max_tokens=400
+        max_tokens=800  # Increased for more detailed response
     )
 
     try:
-        return parse_json(response)
-    except:
+        result = parse_json(response)
+
+        # Ensure all expected fields are present
+        if "visible_elements" not in result:
+            result["visible_elements"] = {}
+        if "image_scope" not in result:
+            result["image_scope"] = {
+                "frame_type": "full_room",
+                "room_coverage_pct": 100,
+                "camera_angle": "eye_level"
+            }
+        if "must_retain" not in result:
+            # Fallback to old format if present
+            result["must_retain"] = result.get("must_retain_features", [])
+        if "must_not_add" not in result:
+            # Generate default must_not_add based on visible_elements
+            result["must_not_add"] = _generate_default_must_not_add(result.get("visible_elements", {}))
+
+        print(f"[features_detection] Scope: {result.get('image_scope', {}).get('frame_type', 'unknown')}")
+        print(f"[features_detection] Must retain: {len(result.get('must_retain', []))} items")
+        print(f"[features_detection] Must NOT add: {result.get('must_not_add', [])}")
+
+        return result
+    except Exception as e:
+        print(f"[features_detection] Failed to parse response: {e}")
         return {
-            "must_retain_features": [],
-            "reasoning": "Unable to detect features"
+            "visible_elements": {},
+            "image_scope": {
+                "frame_type": "full_room",
+                "room_coverage_pct": 100,
+                "camera_angle": "eye_level"
+            },
+            "must_retain": [],
+            "must_not_add": [
+                "Do not add windows that don't exist in the original",
+                "Do not add furniture unless specifically requested",
+                "Do not add doors that don't exist in the original"
+            ],
+            "reasoning": "Unable to detect features - using safe defaults"
         }
+
+
+def _generate_default_must_not_add(visible_elements: dict) -> list[str]:
+    """Generate must_not_add list based on what's NOT visible in visible_elements."""
+    must_not_add = []
+
+    # Check windows
+    windows = visible_elements.get("windows", "")
+    if not windows or "no windows" in str(windows).lower() or "none" in str(windows).lower():
+        must_not_add.append("Do not add windows (none visible in original)")
+
+    # Check doors
+    doors = visible_elements.get("doors", "")
+    if not doors or "no doors" in str(doors).lower() or "none" in str(doors).lower():
+        must_not_add.append("Do not add doors (none visible in original)")
+
+    # Check furniture
+    furniture = visible_elements.get("furniture", "")
+    if not furniture or "no furniture" in str(furniture).lower() or "none" in str(furniture).lower():
+        must_not_add.append("Do not add furniture, beds, or couches (none visible in original)")
+
+    # Check fixtures
+    fixtures = visible_elements.get("fixtures", "")
+    if not fixtures or "none" in str(fixtures).lower():
+        must_not_add.append("Do not add light fixtures (none visible in original)")
+
+    # Always include frame constraint
+    must_not_add.append("Do not expand beyond the visible frame of the original image")
+
+    return must_not_add

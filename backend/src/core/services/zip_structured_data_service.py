@@ -23,11 +23,22 @@ import re
 import subprocess
 import threading
 import time as time_module
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import quote
 from dataclasses import dataclass
 
 import requests
+
+if TYPE_CHECKING:
+    from src.core.services.smart_search_service import SearchInsights
+
+# Event broadcasting for SSE
+from src.core.services.event_broadcaster import (
+    emit_search_query,
+    emit_search_result,
+    emit_search_complete,
+    emit_context_ready,
+)
 
 # ----------------------------
 # Caching for Census data (1 hour TTL)
@@ -646,11 +657,12 @@ async def extract_contractor_knowledge_with_llm(
     state_abbr = location.get("state_abbr", "XX")
     finish_tier = budget_context.get("finish_tier", "mid")
 
-    # Truncate content to reduce token count (max ~8000 words)
+    # Truncate content only if extremely large (max ~25000 words ≈ 35k tokens)
+    # Modern LLMs (GPT-4o, Claude) can handle much larger contexts
     words = cleaned_content.split()
-    if len(words) > 8000:
-        cleaned_content = " ".join(words[:8000])
-        print(f"[zip_structured_data] ⚠️  Truncated content from {len(words)} to 8000 words")
+    if len(words) > 25000:
+        cleaned_content = " ".join(words[:25000])
+        print(f"[zip_structured_data] ⚠️  Truncated content from {len(words)} to 25000 words")
 
     # OPTIMIZED: Much shorter prompt
     prompt = f"""Extract renovation contractor knowledge for {city}, {state_abbr} (budget tier: {finish_tier}) from this content.
@@ -691,8 +703,8 @@ REQUIREMENTS:
                 {"role": "system", "content": "Extract contractor knowledge as JSON. Be comprehensive but concise."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2,  # Lower for faster, more consistent output
-            max_tokens=3000,  # Reduced from 4096
+            temperature=0.3,  # Slightly higher for richer descriptions
+            max_tokens=5000,  # Increased for comprehensive extraction
             operation_type="contractor_knowledge_extraction"
         )
 
@@ -755,14 +767,23 @@ async def _fetch_climate_async(lat: float, lon: float) -> Tuple[Optional[Dict[st
         return None, elapsed
 
 
-async def _fetch_tavily_async(api_key: str, queries: List[str]) -> Tuple[List[TavilyResult], float]:
+async def _fetch_tavily_async(
+    api_key: str,
+    queries: List[str],
+    project_id: Optional[str] = None
+) -> Tuple[List[TavilyResult], float]:
     """Async wrapper for Tavily searches - runs queries in parallel."""
     start = time_module.time()
     loop = asyncio.get_event_loop()
     all_results: List[TavilyResult] = []
+    total_queries = len(queries)
 
-    async def search_query(q: str) -> List[TavilyResult]:
+    async def search_query(q: str, idx: int) -> List[TavilyResult]:
         try:
+            # Emit search query event
+            if project_id:
+                await emit_search_query(project_id, q, idx, total_queries)
+
             results = await loop.run_in_executor(
                 None,
                 lambda: tavily_search(
@@ -774,13 +795,24 @@ async def _fetch_tavily_async(api_key: str, queries: List[str]) -> Tuple[List[Ta
                 )
             )
             print(f"[zip_structured_data]   Query '{q[:40]}...' → {len(results)} results")
+
+            # Emit search result events
+            if project_id:
+                for result in results:
+                    await emit_search_result(
+                        project_id,
+                        title=result.title,
+                        url=result.url,
+                        snippet=result.content[:150] if result.content else None
+                    )
+
             return results
         except Exception as e:
             print(f"[zip_structured_data] ❌ Tavily query failed for '{q}': {e}")
             return []
 
     # Run all queries in parallel
-    query_results = await asyncio.gather(*[search_query(q) for q in queries])
+    query_results = await asyncio.gather(*[search_query(q, idx) for idx, q in enumerate(queries)])
     for results in query_results:
         all_results.extend(results)
 
@@ -789,51 +821,38 @@ async def _fetch_tavily_async(api_key: str, queries: List[str]) -> Tuple[List[Ta
 
 
 # ----------------------------
-# Main function
+# Location-only prefetch (fast, no Tavily)
 # ----------------------------
 
-async def get_zip_structured_data(
+async def get_location_data_only(
     zip_code: str,
-    tavily_api_key: Optional[str] = None,
     year: int = 2023,
 ) -> Dict[str, Any]:
     """
-    Main function to fetch all structured data for a zip code.
+    Fast location data prefetch without Tavily search.
 
-    PERFORMANCE OPTIMIZED:
-    - Census, Climate, Tavily run in PARALLEL (not sequential!)
-    - Census data cached for 1 hour
-    - Strict timeouts on all API calls
-    - Reduced Tavily results (2 per query)
+    Called when user enters zip code. Returns:
+    - Location info (city, state, lat/lon)
+    - Census data (demographics, housing age)
+    - Climate data (temperature range, considerations)
 
-    Returns streamlined output with contractor knowledge extracted by LLM:
-    - Location info
-    - Budget indicators (finish tier, income, home value)
-    - Renovation context (owner occupancy, housing age)
-    - Climate (temperature range)
-    - Contractor knowledge (styles, materials, projects, budgets, timelines) - LLM extracted!
+    Does NOT call Tavily - that happens after image analysis with smart queries.
+
+    Returns:
+        Dict with location, budget_indicators, renovation_context, climate
     """
     overall_start = time_module.time()
-
     zip_code = validate_zip(zip_code)
 
-    print(f"[zip_structured_data] 🚀 Fetching structured data for {zip_code} (PARALLEL mode)")
+    print(f"[zip_structured_data] 🚀 Prefetching location data for {zip_code} (no Tavily)")
 
-    # 1. Place lookup (needed first for lat/lon and location string)
+    # 1. Place lookup
     place_start = time_module.time()
     place = get_place_from_zip(zip_code)
     place_time = time_module.time() - place_start
     print(f"[zip_structured_data] Place: {place['city']}, {place['state_abbr']} | {place_time:.2f}s")
 
-    # 2. PARALLEL FETCH: Census, Climate, Tavily all at once!
-    loc = f"{place['city']} {place['state_abbr']}".strip()
-    queries = [
-        f'{loc} kitchen remodel contractor portfolio',
-        f'{loc} bathroom renovation before after',
-        f'{loc} home renovation design trends materials',
-    ]
-
-    # Build parallel tasks
+    # 2. PARALLEL FETCH: Census + Climate only
     tasks = []
 
     # Census task
@@ -846,74 +865,262 @@ async def get_zip_structured_data(
         climate_task = _fetch_climate_async(float(place["latitude"]), float(place["longitude"]))
         tasks.append(climate_task)
 
-    # Tavily task (only if API key provided)
-    if tavily_api_key:
-        tavily_task = _fetch_tavily_async(tavily_api_key, queries)
-        tasks.append(tavily_task)
-
-    # Run all in parallel!
-    print(f"[zip_structured_data] ⚡ Running {len(tasks)} API calls in PARALLEL...")
+    # Run in parallel
+    print(f"[zip_structured_data] ⚡ Running {len(tasks)} API calls in PARALLEL (Census + Climate)...")
     parallel_start = time_module.time()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     parallel_time = time_module.time() - parallel_start
     print(f"[zip_structured_data] ⚡ Parallel fetch completed in {parallel_time:.2f}s")
 
     # Extract results
-    result_idx = 0
-
-    # Census result
     acs_values = {}
     census_time = 0
-    if not isinstance(results[result_idx], Exception):
-        acs_values, census_time = results[result_idx]
+    if not isinstance(results[0], Exception):
+        acs_values, census_time = results[0]
         print(f"[zip_structured_data] ⏱️  Census data: {len(acs_values)} fields | {census_time:.2f}s")
-    else:
-        print(f"[zip_structured_data] ❌ Census failed: {results[result_idx]}")
-    result_idx += 1
 
-    # Climate result
     climate = None
     climate_time = 0
-    if has_coords:
+    if has_coords and len(results) > 1:
+        if not isinstance(results[1], Exception):
+            climate, climate_time = results[1]
+            print(f"[zip_structured_data] ⏱️  Climate data: {climate.get('temp_range_f') if climate else 'None'} | {climate_time:.2f}s")
+
+    # Derive design insights
+    try:
+        design_insights = derive_design_insights(acs_values)
+        print(f"[zip_structured_data] Budget tier: {design_insights['budget_indicators']['finish_tier']}")
+    except Exception as e:
+        print(f"[zip_structured_data] ⚠️  Design insights failed: {e}")
+        design_insights = {
+            "budget_indicators": {"finish_tier": None, "median_household_income": None, "median_home_value": None, "median_gross_rent": None},
+            "renovation_context": {"intensity": None, "owner_occupancy_pct": None, "housing_age_pre_1980_pct": None, "housing_age_pre_1960_pct": None, "likely_project_types": [], "systems_upgrade_priority": None}
+        }
+
+    result = {
+        "location": {
+            "zip": place["zip"],
+            "city": place["city"],
+            "state": place["state"],
+            "state_abbr": place["state_abbr"],
+            "latitude": place.get("latitude"),
+            "longitude": place.get("longitude"),
+        },
+        "budget_indicators": {
+            "finish_tier": design_insights["budget_indicators"]["finish_tier"],
+            "median_household_income": design_insights["budget_indicators"]["median_household_income"],
+            "median_home_value": design_insights["budget_indicators"]["median_home_value"],
+        },
+        "renovation_context": {
+            "owner_occupancy_pct": design_insights["renovation_context"]["owner_occupancy_pct"],
+            "housing_age_pre_1980_pct": design_insights["renovation_context"]["housing_age_pre_1980_pct"],
+            "housing_age_pre_1960_pct": design_insights["renovation_context"]["housing_age_pre_1960_pct"],
+        },
+        "climate": {
+            "temp_range_f": climate.get("temp_range_f") if climate else None,
+            "considerations": climate.get("considerations", []) if climate else [],
+        },
+        "_tavily_pending": True,  # Flag indicating Tavily search still needed
+    }
+
+    total_time = time_module.time() - overall_start
+    print(f"[zip_structured_data] ✅ Location prefetch completed in {total_time:.2f}s")
+
+    return result
+
+
+# ----------------------------
+# Main function
+# ----------------------------
+
+async def get_zip_structured_data(
+    zip_code: str,
+    tavily_api_key: Optional[str] = None,
+    year: int = 2023,
+    search_insights: Optional["SearchInsights"] = None,
+    project_type: Optional[str] = None,
+    location_data: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Main function to fetch all structured data for a zip code.
+
+    PERFORMANCE OPTIMIZED:
+    - Census, Climate, Tavily run in PARALLEL (not sequential!)
+    - Census data cached for 1 hour
+    - Strict timeouts on all API calls
+    - Reduced Tavily results (2 per query)
+
+    NEW: Smart queries from image insights
+    - If search_insights is provided, builds contextual queries based on image analysis
+    - If location_data is provided, skips Census/Climate fetch (already cached)
+
+    Args:
+        zip_code: US zip code
+        tavily_api_key: Tavily API key (required for web search)
+        year: Census year
+        search_insights: Optional SearchInsights from image analysis for smart queries
+        project_type: Optional project type for query building
+        location_data: Optional pre-fetched location data (from get_location_data_only)
+
+    Returns streamlined output with contractor knowledge extracted by LLM:
+    - Location info
+    - Budget indicators (finish tier, income, home value)
+    - Renovation context (owner occupancy, housing age)
+    - Climate (temperature range)
+    - Contractor knowledge (styles, materials, projects, budgets, timelines) - LLM extracted!
+    """
+    overall_start = time_module.time()
+
+    zip_code = validate_zip(zip_code)
+
+    # Determine if we're using smart queries from image insights
+    using_smart_queries = search_insights is not None and search_insights.has_useful_context()
+    mode_label = "SMART QUERY mode" if using_smart_queries else "PARALLEL mode"
+    print(f"[zip_structured_data] 🚀 Fetching structured data for {zip_code} ({mode_label})")
+
+    # 1. Place lookup (use cached if available)
+    if location_data and location_data.get("location"):
+        place = location_data["location"]
+        print(f"[zip_structured_data] Using cached location: {place.get('city')}, {place.get('state_abbr')}")
+        place_time = 0
+    else:
+        place_start = time_module.time()
+        place = get_place_from_zip(zip_code)
+        place_time = time_module.time() - place_start
+        print(f"[zip_structured_data] Place: {place['city']}, {place['state_abbr']} | {place_time:.2f}s")
+
+    # 2. Build queries - smart or generic
+    loc = f"{place.get('city', '')} {place.get('state_abbr', '')}".strip()
+    ptype = project_type or "home renovation"
+
+    if using_smart_queries:
+        # Import and use smart query builder
+        from src.core.services.smart_search_service import build_smart_queries
+        queries = build_smart_queries(
+            insights=search_insights,
+            project_type=ptype,
+            city=place.get("city", ""),
+            state_abbr=place.get("state_abbr", "")
+        )
+        print(f"[zip_structured_data] 🎯 Smart queries built from image insights:")
+        for i, q in enumerate(queries):
+            print(f"[zip_structured_data]   {i+1}. {q}")
+    else:
+        # Generic fallback queries
+        queries = [
+            f'{loc} {ptype} remodel contractor portfolio',
+            f'{loc} {ptype} renovation before after',
+            f'{loc} home renovation design trends materials',
+        ]
+
+    # Build parallel tasks based on what we need
+    tasks = []
+    task_names = []  # Track what each task is for result extraction
+
+    # Check if we have cached location data (Census/Climate already fetched)
+    has_cached_location = location_data is not None and location_data.get("budget_indicators") is not None
+
+    if not has_cached_location:
+        # Need to fetch Census data
+        census_task = _fetch_census_async(zip_code, year)
+        tasks.append(census_task)
+        task_names.append("census")
+
+        # Need to fetch Climate data (only if lat/lon available)
+        has_coords = place.get("latitude") is not None and place.get("longitude") is not None
+        if has_coords:
+            climate_task = _fetch_climate_async(float(place["latitude"]), float(place["longitude"]))
+            tasks.append(climate_task)
+            task_names.append("climate")
+    else:
+        has_coords = False  # Skip climate extraction from results
+
+    # Tavily task (only if API key provided)
+    if tavily_api_key:
+        tavily_task = _fetch_tavily_async(tavily_api_key, queries, project_id)
+        tasks.append(tavily_task)
+        task_names.append("tavily")
+
+    # Run all in parallel (or just Tavily if location cached)
+    if tasks:
+        print(f"[zip_structured_data] ⚡ Running {len(tasks)} API calls in PARALLEL: {task_names}...")
+        parallel_start = time_module.time()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        parallel_time = time_module.time() - parallel_start
+        print(f"[zip_structured_data] ⚡ Parallel fetch completed in {parallel_time:.2f}s")
+    else:
+        results = []
+        parallel_time = 0
+
+    # Extract results based on task_names
+    result_idx = 0
+
+    # Census result (or use cached)
+    acs_values = {}
+    census_time = 0
+    if "census" in task_names:
+        if not isinstance(results[result_idx], Exception):
+            acs_values, census_time = results[result_idx]
+            print(f"[zip_structured_data] ⏱️  Census data: {len(acs_values)} fields | {census_time:.2f}s")
+        else:
+            print(f"[zip_structured_data] ❌ Census failed: {results[result_idx]}")
+        result_idx += 1
+
+    # Climate result (or use cached)
+    climate = None
+    climate_time = 0
+    if "climate" in task_names:
         if not isinstance(results[result_idx], Exception):
             climate, climate_time = results[result_idx]
             print(f"[zip_structured_data] ⏱️  Climate data: {climate.get('temp_range_f') if climate else 'None'} | {climate_time:.2f}s")
         else:
             print(f"[zip_structured_data] ❌ Climate failed: {results[result_idx]}")
         result_idx += 1
+    elif has_cached_location and location_data.get("climate"):
+        climate = location_data["climate"]
+        print(f"[zip_structured_data] Using cached climate data")
 
     # Tavily result
     all_tavily_results: List[TavilyResult] = []
     tavily_time = 0
-    if tavily_api_key:
+    if "tavily" in task_names:
         if not isinstance(results[result_idx], Exception):
             all_tavily_results, tavily_time = results[result_idx]
             print(f"[zip_structured_data] ⏱️  Tavily searches: {len(all_tavily_results)} results | {tavily_time:.2f}s")
         else:
             print(f"[zip_structured_data] ❌ Tavily failed: {results[result_idx]}")
 
-    # 3. Design insights from Census data
-    try:
-        design_insights = derive_design_insights(acs_values)
-        print(f"[zip_structured_data] Budget tier: {design_insights['budget_indicators']['finish_tier']}")
-    except Exception as e:
-        print(f"[zip_structured_data] ❌ Design insights failed: {e}")
+    # 3. Design insights from Census data (or use cached)
+    if has_cached_location:
+        # Use cached design insights
         design_insights = {
-            "budget_indicators": {
-                "finish_tier": None,
-                "median_household_income": None,
-                "median_home_value": None,
-                "median_gross_rent": None,
-            },
-            "renovation_context": {
-                "intensity": None,
-                "owner_occupancy_pct": None,
-                "housing_age_pre_1980_pct": None,
-                "housing_age_pre_1960_pct": None,
-                "likely_project_types": [],
-                "systems_upgrade_priority": None,
-            }
+            "budget_indicators": location_data.get("budget_indicators", {}),
+            "renovation_context": location_data.get("renovation_context", {}),
         }
+        print(f"[zip_structured_data] Using cached design insights: tier={design_insights['budget_indicators'].get('finish_tier')}")
+    else:
+        try:
+            design_insights = derive_design_insights(acs_values)
+            print(f"[zip_structured_data] Budget tier: {design_insights['budget_indicators']['finish_tier']}")
+        except Exception as e:
+            print(f"[zip_structured_data] ❌ Design insights failed: {e}")
+            design_insights = {
+                "budget_indicators": {
+                    "finish_tier": None,
+                    "median_household_income": None,
+                    "median_home_value": None,
+                    "median_gross_rent": None,
+                },
+                "renovation_context": {
+                    "intensity": None,
+                    "owner_occupancy_pct": None,
+                    "housing_age_pre_1980_pct": None,
+                    "housing_age_pre_1960_pct": None,
+                    "likely_project_types": [],
+                    "systems_upgrade_priority": None,
+                }
+            }
 
     # 4. Contractor knowledge via LLM extraction (from Tavily results)
     contractor_knowledge = {
@@ -943,7 +1150,8 @@ async def get_zip_structured_data(
         clean_time = time_module.time() - clean_start
         word_count = len(full_content.split())
         print(f"[zip_structured_data] ⏱️  Content cleaning: {clean_time:.2f}s | {word_count} words")
-
+        with open("debug_cleaned_content.txt", "w", encoding="utf-8") as f:
+            f.write(full_content)
         # Extract contractor knowledge using LLM
         llm_start = time_module.time()
         contractor_knowledge = await extract_contractor_knowledge_with_llm(
@@ -956,6 +1164,16 @@ async def get_zip_structured_data(
         print(f"[zip_structured_data] ⏱️  LLM extraction: {llm_time:.2f}s")
     elif tavily_api_key:
         print(f"[zip_structured_data] ⚠️  No Tavily results found")
+
+    # Extract sources from Tavily results for citation
+    sources = []
+    for tr in all_tavily_results[:10]:  # Limit to 10 sources
+        if tr.url and tr.title:
+            sources.append({
+                "title": tr.title,
+                "url": tr.url,
+                "snippet": (tr.raw_content[:200] + "...") if tr.raw_content and len(tr.raw_content) > 200 else (tr.raw_content or "")
+            })
 
     # Construct final output - streamlined for use in suggestions, images, cost estimation
     result = {
@@ -978,7 +1196,8 @@ async def get_zip_structured_data(
         "climate": {
             "temp_range_f": climate.get("temp_range_f") if climate else None,
         },
-        "contractor_knowledge": contractor_knowledge
+        "contractor_knowledge": contractor_knowledge,
+        "_sources": sources  # Sources for citation in frontend
     }
 
     total_time = time_module.time() - overall_start
@@ -987,5 +1206,15 @@ async def get_zip_structured_data(
 
     print(f"[zip_structured_data] ✅ Successfully compiled structured data with {styles_count} styles, {materials_count} materials")
     print(f"[zip_structured_data] ⏱️  TOTAL TIME: {total_time:.2f}s (Census: {census_time:.2f}s, Climate: {climate_time:.2f}s, Tavily: {tavily_time:.2f}s, LLM: {llm_time:.2f}s)")
+
+    # Emit completion events for SSE streaming
+    if project_id:
+        await emit_search_complete(
+            project_id=project_id,
+            total_sources=len(sources),
+            styles_found=styles_count,
+            materials_found=materials_count
+        )
+        await emit_context_ready(project_id)
 
     return result

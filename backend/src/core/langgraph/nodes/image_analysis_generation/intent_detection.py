@@ -226,7 +226,8 @@ async def generate_expert_suggestions(
     inspirations: dict = None
 ) -> dict:
     """
-    Generate 2-3 expert renovation suggestions based on current state.
+    Generate expert renovation suggestions based on current state and local contractor knowledge.
+    Generates one option per available style from contractor knowledge (typically 3-7 options).
 
     Args:
         project_type: Type of space being renovated
@@ -324,12 +325,12 @@ Temperature Range: {climate.get('temp_range_f', {}).get('min', 'N/A')}°F - {cli
         messages=[
             {
                 "role": "system",
-                "content": "You are a panel of renovation experts providing tailored suggestions. Return JSON only."
+                "content": "You are a panel of renovation experts. CRITICAL: Generate one renovation option for EACH popular_style in the contractor knowledge (if 5 styles provided, output exactly 5 options). Each option must have 5-8 key_changes. Return JSON only."
             },
             {"role": "user", "content": prompt}
         ],
         temperature=0.7,
-        max_tokens=1500,
+        max_tokens=6000,  # Increased to support 5+ options (one per style)
         operation_type="expert_suggestions"
     )
     print("="*80)

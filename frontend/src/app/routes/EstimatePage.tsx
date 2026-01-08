@@ -11,6 +11,8 @@ import ImageLightbox from "../../components/shared/ImageLightBox";
 import { api } from "../../lib/api";
 import { storage } from "../../lib/storage";
 import { TokenPopup } from "../../components/TokenPopup";
+import SuggestionCards, { SuggestionOption, Source } from "../../components/SuggestionCards";
+import { ContextProgress } from "../../components/ContextProgress";
 
 // ==================== TYPES ====================
 interface Message {
@@ -20,10 +22,14 @@ interface Message {
 }
 
 interface MessageContent {
-  type: "text" | "image_url" | "tier_cards";
+  type: "text" | "image_url" | "tier_cards" | "suggestion_cards";
   text?: string;
   image_url?: { url: string };
   tiers?: CostTier[];
+  // For suggestion_cards
+  options?: SuggestionOption[];
+  sources?: Source[];
+  follow_up_message?: string;
 }
 
 interface CategoryBreakdown {
@@ -313,30 +319,32 @@ const ProgressBar = memo(function ProgressBar({ currentStage }: { currentStage: 
   );
 });
 
+// ==================== WAVY TEXT COMPONENT ====================
+function WavyText({ text }: { text: string }) {
+  return (
+    <span className="inline-flex">
+      {text.split('').map((char, i) => (
+        <motion.span
+          key={i}
+          animate={{ y: [0, -3, 0] }}
+          transition={{
+            duration: 1.2,
+            repeat: Infinity,
+            ease: "easeInOut",
+            delay: i * 0.05, // Stagger creates wave effect
+          }}
+          className="inline-block"
+          style={{ whiteSpace: char === ' ' ? 'pre' : 'normal' }}
+        >
+          {char}
+        </motion.span>
+      ))}
+    </span>
+  );
+}
+
 // ==================== TYPING INDICATOR ====================
 function TypingIndicator({ status = "Processing..." }: { status?: string }) {
-  // Remove trailing "..." if present (we add our own animation)
-  const displayStatus = status.replace(/\.{3}$/, '');
-  const [displayedText, setDisplayedText] = useState("");
-  const [currentStatus, setCurrentStatus] = useState(displayStatus);
-
-  // Typewriter effect when status changes
-  useEffect(() => {
-    if (displayStatus !== currentStatus) {
-      setCurrentStatus(displayStatus);
-      setDisplayedText("");
-    }
-  }, [displayStatus, currentStatus]);
-
-  useEffect(() => {
-    if (displayedText.length < currentStatus.length) {
-      const timer = setTimeout(() => {
-        setDisplayedText(currentStatus.slice(0, displayedText.length + 1));
-      }, 30); // Typewriter speed
-      return () => clearTimeout(timer);
-    }
-  }, [displayedText, currentStatus]);
-
   return (
     <div className="flex items-center gap-2">
       {/* Animated avatar with pulse */}
@@ -355,7 +363,7 @@ function TypingIndicator({ status = "Processing..." }: { status?: string }) {
       </motion.div>
 
       <motion.div
-        className="flex items-center gap-2 bg-white dark:bg-navy-800 rounded-2xl px-4 py-3 shadow-sm border border-navy-100 dark:border-navy-700 relative overflow-hidden"
+        className="flex items-center bg-white dark:bg-navy-800 rounded-2xl px-4 py-3 shadow-sm border border-navy-100 dark:border-navy-700 relative overflow-hidden"
         initial={{ opacity: 0, scale: 0.95, x: -10 }}
         animate={{ opacity: 1, scale: 1, x: 0 }}
         transition={{ duration: 0.3, ease: "easeOut" }}
@@ -367,39 +375,9 @@ function TypingIndicator({ status = "Processing..." }: { status?: string }) {
           transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
         />
 
-        {/* Typewriter text */}
-        <span className="text-navy-600 dark:text-navy-300 text-sm font-medium relative z-10 min-w-[120px]">
-          {displayedText}
-          {displayedText.length < currentStatus.length && (
-            <motion.span
-              animate={{ opacity: [1, 0] }}
-              transition={{ duration: 0.5, repeat: Infinity }}
-              className="text-amber-500"
-            >
-              |
-            </motion.span>
-          )}
-        </span>
-
-        {/* Animated dots */}
-        <span className="flex gap-1 relative z-10">
-          {[0, 1, 2].map((i) => (
-            <motion.span
-              key={i}
-              animate={{
-                y: [0, -5, 0],
-                scale: [1, 1.2, 1],
-                backgroundColor: ["#f59e0b", "#fbbf24", "#f59e0b"]
-              }}
-              transition={{
-                duration: 0.8,
-                repeat: Infinity,
-                delay: i * 0.2,
-                ease: "easeInOut"
-              }}
-              className="w-1.5 h-1.5 bg-amber-500 rounded-full"
-            />
-          ))}
+        {/* Wavy text - the text itself waves smoothly */}
+        <span className="text-navy-600 dark:text-navy-300 text-sm font-medium relative z-10">
+          <WavyText text={status} />
         </span>
       </motion.div>
     </div>
@@ -1320,15 +1298,26 @@ function TierCards({ tiers, onSelectTier }: { tiers: CostTier[]; onSelectTier: (
 }
 
 // ==================== MESSAGE BUBBLE ====================
-const MessageBubble = memo(function MessageBubble({ message, onSelectTier, onImageClick }: { message: Message; onSelectTier?: (tierId: string) => void; onImageClick?: (url: string) => void }) {
+const MessageBubble = memo(function MessageBubble({
+  message,
+  onSelectTier,
+  onSelectSuggestion,
+  onImageClick
+}: {
+  message: Message;
+  onSelectTier?: (tierId: string) => void;
+  onSelectSuggestion?: (optionIndex: number) => void;
+  onImageClick?: (url: string) => void;
+}) {
   const isUser = message.role === "user";
-  
-  const { textContent, images, tierCards } = useMemo(() => {
-    if (typeof message.content === "string") return { textContent: message.content, images: [], tierCards: null };
+
+  const { textContent, images, tierCards, suggestionCards } = useMemo(() => {
+    if (typeof message.content === "string") return { textContent: message.content, images: [], tierCards: null, suggestionCards: null };
     const text = message.content.filter((p) => p.type === "text").map((p) => p.text).join("\n");
     const imgs = message.content.filter((p) => p.type === "image_url").map((p) => p.image_url?.url).filter(Boolean) as string[];
     const tiers = message.content.find((p) => p.type === "tier_cards");
-    return { textContent: text, images: imgs, tierCards: tiers };
+    const suggestions = message.content.find((p) => p.type === "suggestion_cards");
+    return { textContent: text, images: imgs, tierCards: tiers, suggestionCards: suggestions };
   }, [message.content]);
 
   const getImageSrc = (url: string) => url.startsWith("/") ? `${API_BASE.replace("/api/v1", "")}${url}` : url;
@@ -1396,6 +1385,16 @@ const MessageBubble = memo(function MessageBubble({ message, onSelectTier, onIma
         {tierCards?.tiers && onSelectTier && (
           <div className="mt-3 w-full"><TierCards tiers={tierCards.tiers} onSelectTier={onSelectTier} /></div>
         )}
+
+        {suggestionCards?.options && onSelectSuggestion && (
+          <div className="mt-3 w-full">
+            <SuggestionCards
+              options={suggestionCards.options}
+              sources={suggestionCards.sources}
+              onSelectOption={onSelectSuggestion}
+            />
+          </div>
+        )}
       </div>
     </motion.div>
   );
@@ -1423,6 +1422,10 @@ export default function EstimatePage() {
   const [savedToken, setSavedToken] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [showTokenPopup, setShowTokenPopup] = useState(false);
+
+  // Context gathering state (for SSE streaming during image analysis)
+  const [isGatheringContext, setIsGatheringContext] = useState(false);
+  const [contextReady, setContextReady] = useState(true);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1473,6 +1476,47 @@ export default function EstimatePage() {
       isMounted = false;
     };
   }, []); // Empty dependency array - only run once on mount
+
+  // Trigger context gathering when entering analysis state
+  useEffect(() => {
+    const isAnalyzing = projectState?.current_stage === "image_analysis_generation"
+      && projectState?.image_sub_state === "analyzing";
+
+    if (isAnalyzing && projectId && projectId !== "new") {
+      setIsGatheringContext(true);
+      setContextReady(false);
+    } else if (isGatheringContext && !isAnalyzing) {
+      // Reset when moving past analyzing state
+      setIsGatheringContext(false);
+      setContextReady(true);
+    }
+  }, [projectState?.current_stage, projectState?.image_sub_state, projectId, isGatheringContext]);
+
+  // Fallback timeout for context gathering (60 seconds max)
+  useEffect(() => {
+    if (isGatheringContext && !contextReady) {
+      const timeout = setTimeout(() => {
+        console.warn("[EstimatePage] Context gathering timed out, enabling input");
+        setIsGatheringContext(false);
+        setContextReady(true);
+      }, 60000); // 60 seconds max wait
+      return () => clearTimeout(timeout);
+    }
+  }, [isGatheringContext, contextReady]);
+
+  // Handler for context ready callback
+  const handleContextReady = useCallback(() => {
+    setIsGatheringContext(false);
+    setContextReady(true);
+  }, []);
+
+  // Handler for context error
+  const handleContextError = useCallback((errorMessage: string) => {
+    console.error("[ContextProgress] Error:", errorMessage);
+    // Still mark as ready so user can continue (graceful degradation)
+    setIsGatheringContext(false);
+    setContextReady(true);
+  }, []);
 
   // Add file to upload with video support
   const addFileToUpload = useCallback(async (file: File, thumbnail?: string, duration?: number) => {
@@ -1567,26 +1611,53 @@ export default function EstimatePage() {
     if (pendingFiles.some((f) => f.uploading)) { setError("Please wait for uploads to complete"); return; }
 
     setIsSending(true); setError(null); setInput("");
-    // Set initial thinking status based on current stage
+
+    // Determine thinking status based on WHAT user is sending + current stage
     const stage = projectState?.current_stage || "project_basics";
     const subState = projectState?.image_sub_state;
-    const statusMap: Record<string, string> = {
-      "project_basics": "Getting your project details...",
-      "final_review": "Preparing your summary...",
-      "cost_estimation": "Calculating your estimate...",
-      // Sub-states for image_analysis_generation
-      "analyzing": "Analyzing your room...",
-      "confirming_extraction": "Reviewing extracted details...",
-      "design_conversation": "Understanding your vision...",
-      "generating": "Creating your renovation preview...",
-      "generating_parallel": "Creating multiple previews...",
-      "confirming_proposal": "Reviewing your design...",
+    const hasImages = uploadedFiles.length > 0;
+    const msgLower = messageText.toLowerCase();
+
+    // Context-aware status messages
+    const getThinkingStatus = (): string => {
+      // Priority 1: User is uploading images → analyzing
+      if (hasImages) {
+        return "Analyzing your room...";
+      }
+
+      // Priority 2: Keywords in message that hint at what's happening
+      if (msgLower.includes("suggest") || msgLower.includes("option") || msgLower.includes("style") || msgLower.includes("idea")) {
+        return "Understanding your vision...";
+      }
+      if (msgLower.includes("generate") || msgLower.includes("create") || msgLower.includes("show")) {
+        return "Creating your renovation preview...";
+      }
+      if (msgLower.includes("change") || msgLower.includes("modify") || msgLower.includes("update") || msgLower.includes("different")) {
+        return "Updating your design...";
+      }
+      if (msgLower.includes("confirm") || msgLower.includes("looks good") || msgLower.includes("proceed") || msgLower.includes("continue")) {
+        return "Preparing next steps...";
+      }
+
+      // Priority 3: Stage-based status (fallback)
+      const statusMap: Record<string, string> = {
+        "project_basics": "Getting your project details...",
+        "image_analysis_generation": subState ? ({
+          "analyzing": "Analyzing your room...",
+          "confirming_extraction": "Reviewing extracted details...",
+          "design_conversation": "Understanding your vision...",
+          "generating": "Creating your renovation preview...",
+          "generating_parallel": "Creating multiple previews...",
+          "confirming_proposal": "Reviewing your design...",
+        } as Record<string, string>)[subState] || "Processing your request..." : "Processing your request...",
+        "final_review": "Preparing your summary...",
+        "cost_estimation": "Calculating your estimate...",
+      };
+
+      return statusMap[stage] || "Processing...";
     };
-    if (stage === "image_analysis_generation" && subState) {
-      setThinkingStatus(statusMap[subState] || "Processing...");
-    } else {
-      setThinkingStatus(statusMap[stage] || "Processing...");
-    }
+
+    setThinkingStatus(getThinkingStatus());
     let messageContent: string | MessageContent[] = messageText;
     let displayContent: string | MessageContent[] = messageText;
 
@@ -1668,7 +1739,15 @@ export default function EstimatePage() {
   }, [isSending, input, pendingFiles, projectId]);
 
   const handleSelectTier = useCallback((tierId: string) => { sendMessage(`I select the ${tierId} tier`); }, [sendMessage]);
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }, [sendMessage]);
+  const handleSelectSuggestion = useCallback((optionIndex: number) => { sendMessage(`Generate option ${optionIndex + 1}`); }, [sendMessage]);
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      // Block sending during context gathering
+      if (isGatheringContext && !contextReady) return;
+      sendMessage();
+    }
+  }, [sendMessage, isGatheringContext, contextReady]);
 
   const isCompleted = projectState?.current_stage === "completed";
   const hasUploadingFiles = pendingFiles.some((f) => f.uploading);
@@ -1770,9 +1849,21 @@ export default function EstimatePage() {
         <div className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
           <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
             <AnimatePresence>
-              {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onImageClick={setLightboxImage} />)}
+              {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
             </AnimatePresence>
             {isSending && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
+
+            {/* Context Progress Streaming UI */}
+            <AnimatePresence>
+              {isGatheringContext && !contextReady && projectId && projectId !== "new" && (
+                <ContextProgress
+                  projectId={projectId}
+                  onContextReady={handleContextReady}
+                  onError={handleContextError}
+                />
+              )}
+            </AnimatePresence>
+
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -1808,9 +1899,24 @@ export default function EstimatePage() {
               </motion.button>
               <input ref={fileInputRef} type="file" multiple accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime" onChange={handleFileSelect} className="hidden" />
               <div className="flex-1">
-                <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Type your message..." disabled={isSending} rows={1} className="w-full resize-none rounded-xl border border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-800 px-3 py-2 sm:px-4 sm:py-3 text-sm text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent disabled:opacity-50 disabled:bg-navy-50 dark:disabled:bg-navy-900" />
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={isGatheringContext && !contextReady ? "Type while we analyze your space..." : "Type your message..."}
+                  disabled={isSending}
+                  rows={1}
+                  className="w-full resize-none rounded-xl border border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-800 px-3 py-2 sm:px-4 sm:py-3 text-sm text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent disabled:opacity-50 disabled:bg-navy-50 dark:disabled:bg-navy-900"
+                />
               </div>
-              <motion.button onClick={() => sendMessage()} disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles)} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 bg-gradient-to-r from-amber-500 to-amber-400 text-white rounded-xl shadow-lg shadow-amber-500/25 hover:shadow-xl hover:shadow-amber-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed" title="Send message">
+              <motion.button
+                onClick={() => sendMessage()}
+                disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles) || (isGatheringContext && !contextReady)}
+                whileTap={{ scale: 0.95 }}
+                className="flex-shrink-0 p-2 sm:p-3 bg-gradient-to-r from-amber-500 to-amber-400 text-white rounded-xl shadow-lg shadow-amber-500/25 hover:shadow-xl hover:shadow-amber-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                title={isGatheringContext && !contextReady ? "Gathering context..." : "Send message"}
+              >
                 <Send size={18} className="sm:w-5 sm:h-5" />
               </motion.button>
             </div>

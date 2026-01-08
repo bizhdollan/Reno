@@ -55,6 +55,30 @@ EXTRACTION_CATEGORIES = [
         "extract_fields": ["overall_style", "condition", "age_estimate"],
         "examples": "modern, traditional, transitional, current condition"
     },
+    {
+        "key": "search_context",
+        "label": "Search Context",
+        "description": "Information to build contextual web searches for local renovation examples",
+        "extract_fields": [
+            "detected_era",           # "1970s", "1990s", "2000s", "modern"
+            "style_assessment",       # "dated traditional", "90s contemporary", "modern farmhouse"
+            "problem_areas",          # ["dated countertops", "poor lighting", "cramped layout"]
+            "renovation_scope",       # "cosmetic", "moderate", "full renovation"
+            "material_age_indicators" # ["laminate counters", "vinyl flooring", "brass fixtures"]
+        ],
+        "examples": "era of construction, what needs updating, renovation scope needed"
+    },
+    {
+        "key": "features_to_retain",
+        "label": "Features to Retain",
+        "description": "Structural/architectural features that should be preserved during renovation",
+        "extract_fields": [
+            "must_retain",            # ["2 windows on east wall", "French door to balcony"]
+            "character_features",     # ["exposed brick", "high ceilings", "crown molding"]
+            "practical_constraints"   # ["radiator placement", "plumbing stack location"]
+        ],
+        "examples": "windows, doors, load-bearing walls, built-ins, character elements"
+    },
 ]
 
 
@@ -100,12 +124,18 @@ def build_extraction_json_schema() -> str:
         elif key == "style":
             # Style is also a dict
             schema_parts.append(f'    "{key}": {{\n        "overall_style": "modern",\n        "condition": "good",\n        "age_estimate": "5-10 years"\n    }}')
+        elif key == "search_context":
+            # Search context is a dict with mixed types
+            schema_parts.append(f'    "{key}": {{\n        "detected_era": "1970s",\n        "style_assessment": "dated traditional",\n        "problem_areas": ["dated countertops", "poor lighting"],\n        "renovation_scope": "moderate",\n        "material_age_indicators": ["laminate counters", "vinyl flooring"]\n    }}')
+        elif key == "features_to_retain":
+            # Features to retain is a dict with lists
+            schema_parts.append(f'    "{key}": {{\n        "must_retain": ["2 windows on east wall", "entry door"],\n        "character_features": ["high ceilings", "crown molding"],\n        "practical_constraints": ["radiator placement"]\n    }}')
         else:
             # Others are lists
             fields = cat["extract_fields"]
             example_obj = ", ".join([f'"{f}": "..."' for f in fields])
             schema_parts.append(f'    "{key}": [\n        {{{example_obj}}}\n    ]')
-    
+
     return "{\n" + ",\n".join(schema_parts) + "\n}"
 
 

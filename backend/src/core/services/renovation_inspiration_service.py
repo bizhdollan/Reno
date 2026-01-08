@@ -28,10 +28,19 @@ _inspiration_cache_lock = threading.Lock()
 
 # Import the new structured data service
 try:
-    from src.core.services.zip_structured_data_service import get_zip_structured_data
+    from src.core.services.zip_structured_data_service import (
+        get_zip_structured_data,
+        get_location_data_only,
+    )
     HAS_STRUCTURED_DATA_SERVICE = True
 except ImportError:
     HAS_STRUCTURED_DATA_SERVICE = False
+
+# Type hint for SearchInsights
+try:
+    from src.core.services.smart_search_service import SearchInsights
+except ImportError:
+    SearchInsights = None
 
 
 RENOVATION_INSPIRATION_PROMPT = """You are a renovation design expert. Based on the location and project type, provide comprehensive renovation ideas and inspirations that contractors in this area commonly reference.
@@ -141,9 +150,10 @@ def format_structured_data_as_inspirations(
         "climate": climate,
         "renovation_context": renovation_context,
         "contractor_knowledge": contractor_knowledge,  # This is the gold - all the extracted knowledge
+        "_sources": structured_data.get("_sources", []),  # Pass through Tavily sources for citation
     }
 
-    print(f"[renovation_inspiration] Formatted inspirations with {len(contractor_knowledge.get('popular_styles', []))} styles, {len(contractor_knowledge.get('popular_materials', []))} materials")
+    print(f"[renovation_inspiration] Formatted inspirations with {len(contractor_knowledge.get('popular_styles', []))} styles, {len(contractor_knowledge.get('popular_materials', []))} materials, {len(inspirations['_sources'])} sources")
     return inspirations
 
 
@@ -496,3 +506,263 @@ async def wait_for_inspirations(project_id: UUID, timeout: float = 25.0) -> Opti
     elapsed = time.time() - start_time
     print(f"[renovation_inspiration] ⏰ Timeout waiting for inspirations after {elapsed:.2f}s")
     return None
+
+
+# =============================================================================
+# NEW: Split prefetch/search functions for smart query flow
+# =============================================================================
+
+async def prefetch_location_data(
+    project_id: UUID,
+    zip_code: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Fast location data prefetch without Tavily search.
+
+    Called when user enters zip code. Fetches Census/Climate data only.
+    Tavily search happens later after image analysis with smart queries.
+
+    Args:
+        project_id: UUID of the project
+        zip_code: US zip code
+
+    Returns:
+        Location data dict or None if failed
+    """
+    start_time = time.time()
+
+    if not validate_us_zip_code(zip_code):
+        print(f"[renovation_inspiration] Invalid zip code: {zip_code}")
+        return None
+
+    if not HAS_STRUCTURED_DATA_SERVICE:
+        print(f"[renovation_inspiration] Structured data service not available")
+        return None
+
+    try:
+        # Fetch location data only (Census + Climate, no Tavily)
+        location_data = await get_location_data_only(zip_code=zip_code)
+
+        if not location_data:
+            print(f"[renovation_inspiration] Failed to get location data for {zip_code}")
+            return None
+
+        # Store partial data in database with _tavily_pending flag
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                # Store location data with pending flag
+                project.renovation_inspirations = {
+                    **location_data,
+                    "_tavily_pending": True,
+                    "_prefetch_time": time.time(),
+                }
+                db.commit()
+                elapsed = time.time() - start_time
+                print(f"[renovation_inspiration] ✅ Location prefetch completed in {elapsed:.2f}s (Tavily pending)")
+                return location_data
+        finally:
+            db.close()
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"[renovation_inspiration] ❌ Location prefetch failed after {elapsed:.2f}s: {e}")
+        import traceback
+        traceback.print_exc()
+
+    return None
+
+
+async def run_smart_search(
+    project_id: UUID,
+    project_type: str,
+    zip_code: str,
+    search_insights: "SearchInsights",
+    location_data: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Run Tavily search with smart queries built from image insights.
+
+    Called AFTER image analysis completes with search context extracted.
+
+    Args:
+        project_id: UUID of the project
+        project_type: Type of renovation
+        zip_code: US zip code
+        search_insights: SearchInsights from image analysis
+        location_data: Optional pre-fetched location data
+
+    Returns:
+        Complete inspiration data with contractor knowledge or None if failed
+    """
+    start_time = time.time()
+
+    if not validate_us_zip_code(zip_code):
+        print(f"[renovation_inspiration] Invalid zip code: {zip_code}")
+        return None
+
+    if not HAS_STRUCTURED_DATA_SERVICE:
+        print(f"[renovation_inspiration] Structured data service not available")
+        return None
+
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+    if not tavily_api_key:
+        print(f"[renovation_inspiration] No Tavily API key available")
+        return None
+
+    try:
+        # Get location data from cache or database if not provided
+        if not location_data:
+            db = SessionLocal()
+            try:
+                project = db.query(Project).filter(Project.id == project_id).first()
+                if project and project.renovation_inspirations:
+                    location_data = project.renovation_inspirations
+            finally:
+                db.close()
+
+        # Run structured data fetch with smart queries (with SSE event broadcasting)
+        structured_data = await get_zip_structured_data(
+            zip_code=zip_code,
+            tavily_api_key=tavily_api_key,
+            search_insights=search_insights,
+            project_type=project_type,
+            location_data=location_data,
+            project_id=str(project_id),  # Pass project_id for SSE events
+        )
+
+        if not structured_data:
+            print(f"[renovation_inspiration] Smart search returned no data")
+            return None
+
+        # Format and store results
+        inspirations = format_structured_data_as_inspirations(
+            structured_data=structured_data,
+            project_type=project_type
+        )
+
+        # Add metadata
+        inspirations['_metadata'] = {
+            'zip_code': zip_code,
+            'project_type': project_type,
+            'retrieved_at': time.time(),
+            'smart_search': True,
+            'search_insights': {
+                'detected_era': search_insights.detected_era,
+                'style_assessment': search_insights.style_assessment,
+                'problem_areas': search_insights.problem_areas[:3] if search_insights.problem_areas else [],
+            }
+        }
+
+        # Store in database
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                project.renovation_inspirations = inspirations
+                db.commit()
+                elapsed = time.time() - start_time
+                print(f"[renovation_inspiration] ✅ Smart search completed in {elapsed:.2f}s")
+
+                # Emit context_ready event via SSE
+                from src.core.services.event_broadcaster import emit_context_ready
+                await emit_context_ready(str(project_id))
+
+                return inspirations
+        finally:
+            db.close()
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"[renovation_inspiration] ❌ Smart search failed after {elapsed:.2f}s: {e}")
+        import traceback
+        traceback.print_exc()
+
+    return None
+
+
+def _run_prefetch_in_thread(project_id: UUID, zip_code: str):
+    """Run location prefetch in a new event loop in a separate thread."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(prefetch_location_data(project_id, zip_code))
+    finally:
+        loop.close()
+
+
+def _run_smart_search_in_thread(
+    project_id: UUID,
+    project_type: str,
+    zip_code: str,
+    search_insights: "SearchInsights",
+    location_data: Optional[Dict[str, Any]] = None
+):
+    """Run smart search in a new event loop in a separate thread."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(
+            run_smart_search(
+                project_id=project_id,
+                project_type=project_type,
+                zip_code=zip_code,
+                search_insights=search_insights,
+                location_data=location_data,
+            )
+        )
+    finally:
+        loop.close()
+
+
+def start_location_prefetch_background(
+    project_id: UUID,
+    zip_code: str
+) -> None:
+    """
+    Start background task to prefetch location data (no Tavily).
+
+    This is called when user enters zip code. Fast operation (~2-5s).
+
+    Args:
+        project_id: UUID of the project
+        zip_code: US zip code
+    """
+    thread = threading.Thread(
+        target=_run_prefetch_in_thread,
+        args=(project_id, zip_code),
+        daemon=True,
+        name=f"location-prefetch-{zip_code}"
+    )
+    thread.start()
+    print(f"[renovation_inspiration] 🚀 Started location prefetch for project {project_id} | zip={zip_code}")
+
+
+def start_smart_search_background(
+    project_id: UUID,
+    project_type: str,
+    zip_code: str,
+    search_insights: "SearchInsights",
+    location_data: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Start background task to run smart Tavily search.
+
+    This is called AFTER image analysis completes with search insights.
+
+    Args:
+        project_id: UUID of the project
+        project_type: Type of renovation
+        zip_code: US zip code
+        search_insights: SearchInsights from image analysis
+        location_data: Optional pre-fetched location data
+    """
+    thread = threading.Thread(
+        target=_run_smart_search_in_thread,
+        args=(project_id, project_type, zip_code, search_insights, location_data),
+        daemon=True,
+        name=f"smart-search-{zip_code}"
+    )
+    thread.start()
+    print(f"[renovation_inspiration] 🎯 Started smart search for project {project_id} | zip={zip_code} | insights={search_insights.detected_era}")

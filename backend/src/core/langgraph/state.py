@@ -72,6 +72,7 @@ class ExtractedData(TypedDict, total=False):
     fixtures: list[dict]
     appliances: list[dict]
     style: dict
+    search_context: dict  # For smart Tavily search (detected_era, style_assessment, problem_areas, etc.)
     # Extensible - add more categories as needed
 
 
@@ -189,6 +190,7 @@ class ProjectState(TypedDict, total=False):
     # Expert suggestions flow
     expertise_level: str | None
     pending_suggestions: list[dict] | None
+    all_suggestions: list[dict] | None  # Permanent store for option switching
     selected_options_for_generation: list[dict] | None
     generated_options: list[dict] | None
     pending_feedback: str | None
@@ -252,6 +254,7 @@ def create_initial_state(project_id: str | None = None) -> ProjectState:
         # Expert suggestions flow
         expertise_level=None,
         pending_suggestions=None,
+        all_suggestions=None,
         selected_options_for_generation=None,
         generated_options=None,
         pending_feedback=None,
@@ -303,10 +306,10 @@ def get_missing_basics(state: ProjectState) -> list[str]:
 def merge_image_analyses_to_extracted(image_analyses: list[ImageAnalysis]) -> ExtractedData:
     """
     Merge per-image analyses into a single ExtractedData dict.
-    
+
     Strategy:
     - Lists (materials, colors, fixtures, appliances): combine and deduplicate by name
-    - Dicts (measurements, style): use first available or merge intelligently
+    - Dicts (measurements, style, search_context): use first available or merge intelligently
     """
     merged: ExtractedData = {
         "materials": [],
@@ -314,7 +317,8 @@ def merge_image_analyses_to_extracted(image_analyses: list[ImageAnalysis]) -> Ex
         "colors": [],
         "fixtures": [],
         "appliances": [],
-        "style": {}
+        "style": {},
+        "search_context": {}  # Added for smart Tavily search
     }
     
     seen_materials = set()
@@ -360,7 +364,11 @@ def merge_image_analyses_to_extracted(image_analyses: list[ImageAnalysis]) -> Ex
         # Style: use first available
         if not merged["style"] and analysis.get("style"):
             merged["style"] = analysis["style"]
-    
+
+        # Search context: use first available (for smart Tavily search)
+        if not merged["search_context"] and analysis.get("search_context"):
+            merged["search_context"] = analysis["search_context"]
+
     return merged
 
 

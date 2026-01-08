@@ -41,6 +41,10 @@ from src.core.langgraph.nodes.image_analysis_generation.analysis import (
     detect_features_to_retain,
 )
 
+# Smart search integration
+from src.core.services.smart_search_service import extract_search_insights
+from src.core.services.renovation_inspiration_service import start_smart_search_background
+
 # NEW: Service integration layer for DB-backed operations
 from src.core.langgraph.nodes.image_analysis_generation.node_services import (
     ServiceIntegration,
@@ -65,8 +69,8 @@ class ImageSubState(str, Enum):
 
 # Timeout configuration (in seconds)
 IMAGE_GENERATION_TIMEOUT = 90.0  # 90 seconds for image generation operations
-INSPIRATION_WAIT_TIMEOUT = 30.0  # 30 seconds max wait for inspirations
-INSPIRATION_RETRY_INTERVAL = 2.0  # Check every 2 seconds
+INSPIRATION_WAIT_TIMEOUT = 45.0  # 45 seconds max wait for inspirations (smart search takes ~35-40s)
+INSPIRATION_RETRY_INTERVAL = 3.0  # Check every 3 seconds
 
 
 async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_seconds: float = INSPIRATION_WAIT_TIMEOUT) -> dict:
@@ -98,36 +102,40 @@ async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_
             print(f"[inspirations] Project not found: {project_id_token}")
             return None
 
-        # Check if inspirations already available
+        # Check if inspirations already available AND complete (not pending Tavily)
         if project.renovation_inspirations:
-            print(f"[inspirations] Retrieved existing inspirations for {project_id_token}")
+            if not project.renovation_inspirations.get("_tavily_pending"):
+                print(f"[inspirations] Retrieved complete inspirations for {project_id_token}")
+                return project.renovation_inspirations
+            else:
+                print(f"[inspirations] Inspirations exist but Tavily search pending, waiting...")
+
+        # Need to wait: either no inspirations or Tavily pending
+        # Wait with retries
+        elapsed = 0
+        while elapsed < max_wait_seconds:
+            await asyncio.sleep(INSPIRATION_RETRY_INTERVAL)
+            elapsed = asyncio.get_event_loop().time() - start_time
+
+            # Refresh and check again
+            db.refresh(project)
+            if project.renovation_inspirations:
+                # Check if Tavily search completed (no pending flag)
+                if not project.renovation_inspirations.get("_tavily_pending"):
+                    print(f"[inspirations] Complete inspirations available after {elapsed:.1f}s")
+                    return project.renovation_inspirations
+                else:
+                    print(f"[inspirations] Tavily still pending... ({elapsed:.1f}s/{max_wait_seconds}s)")
+            else:
+                print(f"[inspirations] Still waiting for inspirations... ({elapsed:.1f}s/{max_wait_seconds}s)")
+
+        # Timeout reached - return whatever we have (even if pending)
+        if project.renovation_inspirations:
+            print(f"[inspirations] Timeout reached, returning partial inspirations (Tavily may be pending)")
             return project.renovation_inspirations
 
-        # Check if project was created recently (within last 60 seconds)
-        # If so, background task might still be running
-        if project.created_at and (datetime.utcnow() - project.created_at).total_seconds() < 60:
-            print(f"[inspirations] Project created recently, waiting for background task...")
-
-            # Wait with retries
-            elapsed = 0
-            while elapsed < max_wait_seconds:
-                await asyncio.sleep(INSPIRATION_RETRY_INTERVAL)
-                elapsed = asyncio.get_event_loop().time() - start_time
-
-                # Refresh and check again
-                db.refresh(project)
-                if project.renovation_inspirations:
-                    print(f"[inspirations] Inspirations became available after {elapsed:.1f}s")
-                    return project.renovation_inspirations
-
-                print(f"[inspirations] Still waiting... ({elapsed:.1f}s/{max_wait_seconds}s)")
-
-            print(f"[inspirations] Timeout reached, proceeding without inspirations")
-            return None
-        else:
-            # Project is old, background task likely failed or wasn't triggered
-            print(f"[inspirations] No inspirations available (project created {datetime.utcnow() - project.created_at if project.created_at else 'unknown'} ago)")
-            return None
+        print(f"[inspirations] Timeout reached, no inspirations available")
+        return None
 
     except Exception as e:
         print(f"[inspirations] Error retrieving inspirations: {e}")
@@ -221,6 +229,14 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
     if state.get("brief_room_summary"):
         updates["brief_room_summary"] = state["brief_room_summary"]
 
+    # NEW: Preserve hallucination prevention data
+    if state.get("_visible_elements"):
+        updates["_visible_elements"] = state["_visible_elements"]
+    if state.get("_image_scope"):
+        updates["_image_scope"] = state["_image_scope"]
+    if state.get("_must_not_add"):
+        updates["_must_not_add"] = state["_must_not_add"]
+
     # Clear pending images after using
     if pending_images:
         updates["_pending_images"] = []
@@ -237,8 +253,15 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
         if new_image_urls:
             print(f"[image_analysis] Processing {len(new_image_urls)} images in parallel...")
 
-            # Analyze all images in parallel
-            image_analyses = await analyze_images_parallel(new_image_urls, project_type)
+            # Get project_id for event broadcasting
+            project_id_for_events = state.get("project_id")
+
+            # Analyze all images in parallel (with progress events)
+            image_analyses = await analyze_images_parallel(
+                image_urls=new_image_urls,
+                project_type=project_type,
+                project_id=project_id_for_events
+            )
             updates["image_analyses"] = image_analyses
 
             # Merge into extracted_data (kept internally, not shown to user)
@@ -255,9 +278,20 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
             features_result, summary_result = await asyncio.gather(features_task, summary_task)
 
             # Store features to retain for later image generation
-            features_to_retain = features_result.get("must_retain_features", [])
+            # NEW: Also extract visible_elements, image_scope, and must_not_add for hallucination prevention
+            features_to_retain = features_result.get("must_retain", features_result.get("must_retain_features", []))
+            visible_elements = features_result.get("visible_elements", {})
+            image_scope = features_result.get("image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
+            must_not_add = features_result.get("must_not_add", [])
+
             updates["original_features_to_retain"] = features_to_retain
+            updates["_visible_elements"] = visible_elements
+            updates["_image_scope"] = image_scope
+            updates["_must_not_add"] = must_not_add
+
             print(f"[image_analysis] Features to retain: {features_to_retain}")
+            print(f"[image_analysis] Image scope: {image_scope.get('frame_type')} (~{image_scope.get('room_coverage_pct')}%)")
+            print(f"[image_analysis] Must NOT add: {must_not_add}")
 
             # Store brief summary
             brief_summary = summary_result.get("brief_summary", f"A {project_type} space.")
@@ -287,6 +321,84 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                     print(f"[image_analysis] Stored {len(image_analyses)} analyses in DB")
                 except Exception as e:
                     print(f"[image_analysis] DB storage failed (continuing with state): {e}")
+
+            # NEW: Trigger smart Tavily search with image insights
+            # This replaces the generic search that ran on zip code entry
+            zip_code = state.get("zip_code")
+            project_id_token = state.get("project_id")
+            if zip_code and project_id_token:
+                try:
+                    # Extract search insights from image analysis
+                    search_insights = extract_search_insights(extracted_data)
+
+                    # Debug: Log the raw search_context data
+                    raw_search_context = extracted_data.get("search_context", {})
+                    print(f"[image_analysis] DEBUG search_context raw: {raw_search_context}")
+                    print(f"[image_analysis] DEBUG search_insights: era={search_insights.detected_era}, "
+                          f"style={search_insights.style_assessment}, problems={search_insights.problem_areas}, "
+                          f"scope={search_insights.renovation_scope}, materials={search_insights.material_indicators}")
+
+                    if search_insights.has_useful_context():
+                        print(f"[image_analysis] 🎯 Extracted search insights: era={search_insights.detected_era}, "
+                              f"style={search_insights.style_assessment}, problems={search_insights.problem_areas[:2]}")
+
+                        # Get project UUID from database for smart search
+                        db = SessionLocal()
+                        try:
+                            project = db.query(Project).filter(Project.token == project_id_token).first()
+                            if project:
+                                # Start smart search in background with image-derived insights
+                                start_smart_search_background(
+                                    project_id=project.id,
+                                    project_type=project_type,
+                                    zip_code=zip_code,
+                                    search_insights=search_insights
+                                )
+                                print(f"[image_analysis] 🚀 Started smart Tavily search for {project_type} in {zip_code}")
+                            else:
+                                print(f"[image_analysis] ⚠️  Project not found for token {project_id_token}")
+                                # Emit context_ready since no smart search will run
+                                from src.core.services.event_broadcaster import emit_context_ready
+                                asyncio.create_task(emit_context_ready(project_id_token))
+                        finally:
+                            db.close()
+                    else:
+                        print(f"[image_analysis] ⚠️  No useful search context extracted from images")
+                        # Emit context_ready since no smart search will run
+                        from src.core.services.event_broadcaster import emit_context_ready
+                        db = SessionLocal()
+                        try:
+                            project = db.query(Project).filter(Project.token == project_id_token).first()
+                            if project:
+                                asyncio.create_task(emit_context_ready(str(project.id)))
+                        finally:
+                            db.close()
+                except Exception as e:
+                    print(f"[image_analysis] ⚠️  Smart search trigger failed: {e}")
+                    # Emit context_ready on error so frontend isn't blocked
+                    from src.core.services.event_broadcaster import emit_context_ready
+                    db = SessionLocal()
+                    try:
+                        project = db.query(Project).filter(Project.token == project_id_token).first()
+                        if project:
+                            asyncio.create_task(emit_context_ready(str(project.id)))
+                    except Exception:
+                        pass
+                    finally:
+                        db.close()
+            else:
+                # No zip_code or project_id_token available - emit context_ready anyway
+                if project_id_token:
+                    from src.core.services.event_broadcaster import emit_context_ready
+                    db = SessionLocal()
+                    try:
+                        project = db.query(Project).filter(Project.token == project_id_token).first()
+                        if project:
+                            asyncio.create_task(emit_context_ready(str(project.id)))
+                    except Exception:
+                        pass
+                    finally:
+                        db.close()
 
             # Initialize empty image history
             updates["generated_image_history"] = []
@@ -548,9 +660,18 @@ async def _handle_design_conversation(
                 inspirations=inspirations
             )
 
-            updates["pending_suggestions"] = suggestions_result.get("options", [])
-            response = _format_suggestions_response(suggestions_result)
-            updates["messages"] = [{"role": "assistant", "content": response}]
+            suggestions_options = suggestions_result.get("options", [])
+            updates["pending_suggestions"] = suggestions_options
+            # Store all suggestions permanently so user can switch between options later
+            updates["all_suggestions"] = suggestions_options
+
+            # Return structured content for card rendering
+            response_content = [
+                {"type": "text", "text": "# Renovation Options\n\nBased on your space and local design trends, here are my recommendations:"},
+                _format_suggestions_as_cards(suggestions_result, inspirations),
+                {"type": "text", "text": "\n\nSelect an option to see it visualized, or tell me if you have a different idea in mind!"}
+            ]
+            updates["messages"] = [{"role": "assistant", "content": response_content}]
             updates["awaiting_user_input"] = True
             return updates
 
@@ -717,6 +838,11 @@ async def _handle_generating(
     features_to_retain = state.get("original_features_to_retain", [])
     image_history = list(state.get("generated_image_history", []))
 
+    # NEW: Get hallucination prevention data
+    visible_elements = state.get("_visible_elements", {})
+    image_scope = state.get("_image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
+    must_not_add = state.get("_must_not_add", [])
+
     if not original_image_urls:
         generated_url = get_placeholder_image_url()
         generation_prompt = ""
@@ -732,6 +858,9 @@ async def _handle_generating(
                 feedback=None,
                 previous_prompt=None,
                 features_to_retain=features_to_retain,
+                visible_elements=visible_elements,
+                must_not_add=must_not_add,
+                image_scope=image_scope,
             )
 
             image_history = add_to_image_history(
@@ -761,6 +890,9 @@ async def _handle_generating(
                     feedback=None,
                     previous_prompt=None,
                     features_to_retain=features_to_retain,
+                    visible_elements=visible_elements,
+                    must_not_add=must_not_add,
+                    image_scope=image_scope,
                 )
                 return {"url": url, "prompt": prompt, "description": desc, "perspective": perspective_idx, "success": True}
             except Exception as e:
@@ -873,6 +1005,11 @@ async def _handle_generating_parallel(
     features_to_retain = state.get("original_features_to_retain", [])
     image_history = list(state.get("generated_image_history", []))
 
+    # NEW: Get hallucination prevention data
+    visible_elements = state.get("_visible_elements", {})
+    image_scope = state.get("_image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
+    must_not_add = state.get("_must_not_add", [])
+
     if not selected_options or not original_image_urls:
         logger.warning(f"Missing data - options: {len(selected_options)}, images: {len(original_image_urls)}")
         response = "Unable to generate options. Please go back and select options again."
@@ -911,6 +1048,9 @@ async def _handle_generating_parallel(
                 feedback=None,
                 previous_prompt=None,
                 features_to_retain=features_to_retain,
+                visible_elements=visible_elements,
+                must_not_add=must_not_add,
+                image_scope=image_scope,
             )
 
             return {
@@ -1033,6 +1173,84 @@ async def _handle_confirming_proposal(
         )
 
     if user_message:
+        # Check if user is selecting a different option from all_suggestions
+        # This allows switching between options even after generating one
+        all_suggestions = state.get("all_suggestions", [])
+        if all_suggestions:
+            selected_indices = _parse_option_selection(user_message, all_suggestions)
+            if selected_indices:
+                selected_idx = selected_indices[0]
+                if selected_idx < len(all_suggestions):
+                    opt = all_suggestions[selected_idx]
+                    print(f"[confirming_proposal] Switching to option {selected_idx + 1}: {opt.get('style_name')}")
+
+                    # Update renovation vision with the new selected option
+                    new_renovation_vision = {
+                        "raw_input": f"Style: {opt.get('style_name')}",
+                        "ai_summary": opt.get("description", ""),
+                        "style_preferences": opt.get("style_name"),
+                        "material_preferences": json.dumps(opt.get("materials", {})),
+                        "specific_changes": ", ".join(opt.get("key_changes", [])),
+                        "selected_option": opt
+                    }
+                    updates["renovation_vision"] = new_renovation_vision
+
+                    # Clear feedback since this is a fresh generation
+                    updates["image_generation_feedback"] = []
+
+                    # Get original image URLs for fresh generation
+                    stored_original_urls = state.get("original_image_urls", [])
+                    if not stored_original_urls:
+                        stored_original_urls = [img["url"] for img in image_analyses]
+
+                    # NEW: Get hallucination prevention data
+                    visible_elements = state.get("_visible_elements", {})
+                    image_scope = state.get("_image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
+                    must_not_add = state.get("_must_not_add", [])
+
+                    # Generate new image with the selected option
+                    try:
+                        new_url, new_prompt, new_description = await generate_renovation_image(
+                            original_image_urls=stored_original_urls,
+                            project_type=project_type,
+                            extracted_data=extracted_data,
+                            renovation_vision=new_renovation_vision,
+                            feedback=None,
+                            previous_prompt=None,
+                            features_to_retain=features_to_retain,
+                            visible_elements=visible_elements,
+                            must_not_add=must_not_add,
+                            image_scope=image_scope,
+                        )
+
+                        image_history = add_to_image_history(
+                            history=image_history,
+                            url=new_url,
+                            description=new_description,
+                            base_perspective=0,
+                            user_satisfied=None
+                        )
+
+                        updates["generated_image_url"] = new_url
+                        updates["last_generated_image_url"] = new_url
+                        updates["generation_prompt"] = new_prompt
+                        updates["generation_description"] = new_description
+                        updates["generated_image_history"] = image_history
+
+                        response = (
+                            f'<img src="{new_url}" style="width: 100%; max-width: 800px; '
+                            f'border-radius: 12px; margin: 16px 0;" />\n\n'
+                            f"{new_description}\n\n"
+                            f"How's this? Say **'continue'** when ready, or request more changes."
+                        )
+                    except Exception as e:
+                        print(f"[confirming_proposal] Option switch generation failed: {e}")
+                        response = f"I encountered an issue generating the new option. Please try again or request specific changes."
+
+                    updates["messages"] = [{"role": "assistant", "content": response}]
+                    updates["awaiting_user_input"] = True
+                    return updates
+
         # Use LLM-based classification for all user messages - no hardcoded keywords
         context = f"User is reviewing a generated renovation preview with {len(image_history)} generated images."
         unified_result = await unified_classify(
@@ -1142,6 +1360,12 @@ async def _handle_regeneration(
     use_services: bool = False
 ) -> dict:
     """Handle image regeneration based on user feedback."""
+
+    # NEW: Get hallucination prevention data
+    visible_elements = state.get("_visible_elements", {})
+    image_scope = state.get("_image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
+    must_not_add = state.get("_must_not_add", [])
+
     raw_feedback = conv_type.get("generation_changes") or user_message
     if isinstance(raw_feedback, dict):
         feedback_content = json.dumps(raw_feedback) if raw_feedback else user_message
@@ -1224,6 +1448,9 @@ async def _handle_regeneration(
             feedback=feedback_list,
             previous_prompt=stored_generation_prompt if regen_mode != "style_change" else None,
             features_to_retain=features_to_retain,
+            visible_elements=visible_elements,
+            must_not_add=must_not_add,
+            image_scope=image_scope,
         )
 
         image_history = add_to_image_history(
@@ -1269,6 +1496,12 @@ async def _handle_multi_image_regeneration(
     stored_original_urls: list
 ) -> dict:
     """Handle regeneration for multiple images."""
+
+    # NEW: Get hallucination prevention data
+    visible_elements = state.get("_visible_elements", {})
+    image_scope = state.get("_image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
+    must_not_add = state.get("_must_not_add", [])
+
     async def regenerate_single_image(img_idx: int, specific_feedback: str):
         try:
             base_url = generated_options[img_idx].get("url") if img_idx < len(generated_options) else stored_original_urls[0]
@@ -1280,6 +1513,9 @@ async def _handle_multi_image_regeneration(
                 feedback=[specific_feedback],
                 previous_prompt=generated_options[img_idx].get("prompt") if img_idx < len(generated_options) else None,
                 features_to_retain=features_to_retain,
+                visible_elements=visible_elements,
+                must_not_add=must_not_add,
+                image_scope=image_scope,
             )
             return {"position": img_idx + 1, "url": url, "description": desc, "success": True}
         except Exception as e:
@@ -1352,7 +1588,7 @@ def _parse_option_selection(user_message: str, pending_suggestions: list) -> lis
 
 
 def _format_suggestions_response(suggestions_result: dict) -> str:
-    """Format suggestions for display."""
+    """Format suggestions for display (fallback text format)."""
     options = suggestions_result.get("options", [])
     response_parts = ["# Renovation Options\n\nBased on your space, here are my recommendations:\n"]
 
@@ -1372,6 +1608,28 @@ def _format_suggestions_response(suggestions_result: dict) -> str:
     response_parts.append("\n- \"I like the modern style, generate it\"")
 
     return "".join(response_parts)
+
+
+def _format_suggestions_as_cards(suggestions_result: dict, inspirations: dict | None = None) -> dict:
+    """
+    Format suggestions as a special message type for card rendering.
+
+    Returns a structured dict that the frontend can render as beautiful cards
+    with horizontal scroll (desktop) or vertical stack (mobile).
+    """
+    options = suggestions_result.get("options", [])
+    sources = []
+
+    # Extract sources from inspirations if available
+    if inspirations:
+        sources = inspirations.get("_sources", [])
+
+    return {
+        "type": "suggestion_cards",
+        "options": options,
+        "sources": sources,
+        "follow_up_message": suggestions_result.get("follow_up_message", "")
+    }
 
 
 def _format_multi_perspective_response(generated_results: list, error_note: str) -> str:

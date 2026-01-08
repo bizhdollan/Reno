@@ -45,7 +45,9 @@ Project details:
 
 {contractor_knowledge_context}
 
-Generate 2-3 distinct renovation options, each with a different style/approach.
+**CRITICAL**: Generate one renovation option for EACH popular style in the contractor knowledge data (if 5 styles are provided, generate exactly 5 options). Do NOT skip any styles. If no contractor knowledge is provided, generate 4-5 distinct options based on general trends.
+
+For each style in popular_styles, create one complete option using that style's specific characteristics.
 
 **CRITICAL - Use Contractor Knowledge Data:**
 When contractor knowledge is provided above (popular_styles, popular_materials, budget_expectations), you MUST:
@@ -84,10 +86,11 @@ If popular_materials includes "Quartz countertops" with pairs_well_with ["stainl
 For each option, provide:
 1. **Style name** - Use exact style name from popular_styles if available
 2. **Description** - 2-3 sentences using details from contractor knowledge
-3. **Key changes** - SPECIFIC materials by name from popular_materials
+3. **Key changes** - Generate 5-8 SPECIFIC changes using materials by name from popular_materials
    - Include exact material names, colors, finishes
    - Reference pairs_well_with relationships
    - Mention specific products/brands if provided
+   - Cover: flooring, walls, lighting, fixtures, accents, furniture placement, decor
 4. **Why it works** - Reference regional suitability, climate, local trends
 5. **Budget tier** - Align with popular_materials budget_tier
 6. **Materials** - Use exact names from contractor knowledge
@@ -102,7 +105,10 @@ Return JSON:
             "key_changes": [
                 "Specific change 1 with exact material names (e.g., 'Replace countertops with Carrara marble')",
                 "Specific change 2 (e.g., 'Install matte black faucets and brass hardware')",
-                "Specific change 3 (e.g., 'Add hickory hardwood flooring throughout')"
+                "Specific change 3 (e.g., 'Add hickory hardwood flooring throughout')",
+                "Specific change 4 (e.g., 'Paint walls in Benjamin Moore Swiss Coffee')",
+                "Specific change 5 (e.g., 'Install pendant lighting over island')",
+                "Specific change 6 (e.g., 'Add subway tile backsplash with dark grout')"
             ],
             "why_it_works": "Explanation mentioning regional popularity, climate suitability, and local trends",
             "budget_tier": "economy" | "mid-range" | "premium",

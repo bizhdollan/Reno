@@ -24,6 +24,9 @@ async def generate_renovation_image(
     feedback: list[str] | None = None,
     previous_prompt: str | None = None,
     features_to_retain: list[str] | None = None,
+    visible_elements: dict | None = None,
+    must_not_add: list[str] | None = None,
+    image_scope: dict | None = None,
 ) -> tuple[str, str, str]:
     """
     Generate a renovation preview image using Gemini's image generation model.
@@ -37,6 +40,10 @@ async def generate_renovation_image(
         renovation_vision: Optional user vision with preferences
         feedback: Optional list of user feedback for regeneration
         previous_prompt: Previous generation prompt (for regeneration)
+        features_to_retain: List of features to preserve in the renovation
+        visible_elements: Dict of what's actually visible in the image
+        must_not_add: List of things that should NOT be added during generation
+        image_scope: Dict with frame_type, room_coverage_pct, camera_angle
 
     Returns:
         Tuple of (image_url, generation_prompt, description)
@@ -49,6 +56,12 @@ async def generate_renovation_image(
     """
     print(f"[image_generation] Starting generation for {project_type} project...")
 
+    # Log scope information for debugging
+    if image_scope:
+        print(f"[image_generation] Image scope: {image_scope.get('frame_type', 'unknown')} (~{image_scope.get('room_coverage_pct', 100)}% coverage)")
+    if must_not_add:
+        print(f"[image_generation] Must NOT add: {must_not_add[:3]}..." if len(must_not_add) > 3 else f"[image_generation] Must NOT add: {must_not_add}")
+
     # Ensure generated images directory exists
     GENERATED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -58,14 +71,17 @@ async def generate_renovation_image(
         generation_prompt = build_image_regeneration_prompt(previous_prompt, feedback)
         print(f"[image_generation] Regenerating with feedback: {feedback}")
     else:
-        # Initial generation with features to retain
+        # Initial generation with features to retain and scope constraints
         generation_prompt = build_image_generation_prompt(
             project_type=project_type,
             extracted_data=extracted_data,
             renovation_vision=renovation_vision,
             features_to_retain=features_to_retain,
+            visible_elements=visible_elements,
+            must_not_add=must_not_add,
+            image_scope=image_scope,
         )
-        print(f"[image_generation] Initial generation (retaining: {features_to_retain})")
+        print(f"[image_generation] Initial generation (retaining: {features_to_retain}, scope: {image_scope})")
 
     # Load the first original image as base64 for input
     # (Using first image as primary reference)
@@ -75,11 +91,31 @@ async def generate_renovation_image(
     primary_image_url = original_image_urls[0]
     image_data_url = await load_image_as_base64(primary_image_url)
 
-    # Prepare messages for VGM
+    # Prepare messages for VGM with transformation-focused system message
+    system_message = """You are an IMAGE TRANSFORMATION specialist, NOT a room designer.
+
+Your task is to TRANSFORM the provided image by applying renovation changes while STRICTLY PRESERVING:
+- The EXACT camera angle and perspective shown in the input image
+- The room boundaries and walls visible in the frame
+- The architectural structure (window/door positions if any exist)
+- The overall room proportions and framing
+
+CRITICAL CONSTRAINTS - You must NOT:
+- Add windows, doors, or openings that don't exist in the original image
+- Add furniture, beds, or decor items that aren't in the original (unless explicitly requested)
+- Change the room's architectural structure or layout
+- Expand the visible area beyond what's shown in the original frame
+- Generate a different view angle or perspective than the input
+- Imagine or hallucinate elements not visible in the input image
+
+ONLY modify: surface finishes (floors, walls, ceilings), paint colors, fixtures, and explicitly requested changes.
+
+The output image MUST be recognizable as the SAME SPACE from the SAME ANGLE as the input."""
+
     messages = [
         {
             "role": "system",
-            "content": "You are an expert architectural visualization AI. Generate photorealistic renovation previews based on the provided image and instructions."
+            "content": system_message
         },
         {
             "role": "user",
@@ -90,12 +126,29 @@ async def generate_renovation_image(
         }
     ]
 
+    # Determine temperature based on image scope
+    # Lower temperature for partial views to be more faithful to original
+    if image_scope:
+        coverage = image_scope.get("room_coverage_pct", 100)
+        frame_type = image_scope.get("frame_type", "full_room")
+
+        if frame_type == "corner_view" or coverage <= 30:
+            temperature = 0.3  # Very faithful to original for corner views
+            print(f"[image_generation] Using low temperature (0.3) for corner/partial view")
+        elif frame_type == "wall_view" or coverage <= 60:
+            temperature = 0.4  # Moderately faithful for wall views
+            print(f"[image_generation] Using medium temperature (0.4) for wall view")
+        else:
+            temperature = 0.5  # Standard for full room views
+    else:
+        temperature = 0.5  # Default
+
     # Generate image using VGM
     try:
         provider = LLMProvider.for_vgm()
         result = await provider.generate_image(
             messages=messages,
-            temperature=0.7,
+            temperature=temperature,
             max_tokens=1024
         )
 

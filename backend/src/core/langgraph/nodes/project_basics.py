@@ -10,7 +10,7 @@ from src.core.llm.provider import LLMProvider
 from src.core.langgraph.state import ProjectState
 from src.core.langgraph.utils import get_latest_user_message, parse_json
 from src.core.services.location_service import validate_us_zip_code, extract_location_from_zip
-from src.core.services.renovation_inspiration_service import start_inspiration_retrieval_background
+from src.core.services.renovation_inspiration_service import start_location_prefetch_background
 from src.db.database import SessionLocal
 from src.db.models import Project
 
@@ -216,10 +216,10 @@ async def project_basics_node(state: ProjectState) -> dict:
         final_zip = updates.get("zip_code") or state.get("zip_code")
         final_type = updates.get("project_type") or state.get("project_type")
 
-        # Start background task to retrieve renovation inspirations
-        # This runs asynchronously without blocking the user
+        # Start background task to prefetch location data (Census + Climate)
+        # Tavily search is deferred until image analysis provides search insights
         project_id_token = state.get("project_id")
-        if project_id_token and final_zip and final_type:
+        if project_id_token and final_zip:
             # Validate zip code before starting background task
             if validate_us_zip_code(final_zip):
                 # Get project UUID from database
@@ -228,10 +228,9 @@ async def project_basics_node(state: ProjectState) -> dict:
                     try:
                         project = db.query(Project).filter(Project.token == project_id_token).first()
                         if project:
-                            print(f"[project_basics] Starting renovation inspiration retrieval for {final_type} in {final_zip}")
-                            start_inspiration_retrieval_background(
+                            print(f"[project_basics] Starting location prefetch for zip {final_zip} (Tavily deferred until image analysis)")
+                            start_location_prefetch_background(
                                 project_id=project.id,
-                                project_type=final_type,
                                 zip_code=final_zip
                             )
                         else:
@@ -239,9 +238,9 @@ async def project_basics_node(state: ProjectState) -> dict:
                     finally:
                         db.close()
                 except Exception as e:
-                    print(f"[project_basics] Failed to start inspiration retrieval: {e}")
+                    print(f"[project_basics] Failed to start location prefetch: {e}")
             else:
-                print(f"[project_basics] Invalid zip code {final_zip}, skipping inspiration retrieval")
+                print(f"[project_basics] Invalid zip code {final_zip}, skipping location prefetch")
 
         response = (
             f"Here's what I have:\n\n"

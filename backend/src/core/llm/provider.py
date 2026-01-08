@@ -11,6 +11,24 @@ from src.config import get_llm_config, get_vlm_config, get_vgm_config, LLMConfig
 # supported image formats across all providers (openai, anthropic, gemini)
 SUPPORTED_IMAGE_FORMATS = ["image/jpeg", "image/png", "image/webp"]
 
+# Reasoning models that don't support custom temperature
+# These models only support temperature=1 (or no temperature param)
+REASONING_MODELS = [
+    "gpt-5",
+    "gpt-5-codex",
+    "o1",
+    "o1-mini",
+    "o1-preview",
+    "o3",
+    "o3-mini",
+]
+
+
+def is_reasoning_model(model_name: str) -> bool:
+    """Check if the model is a reasoning model that doesn't support custom temperature."""
+    model_lower = model_name.lower()
+    return any(reasoning in model_lower for reasoning in REASONING_MODELS)
+
 
 # =============================================================================
 # PRICING CONFIGURATION (per 1M tokens)
@@ -219,15 +237,24 @@ class LLMProvider:
         # Generate unique call ID for tracking
         api_call_id = str(uuid4())
 
+        # Handle reasoning models (gpt-5, o1, o3, etc.) that don't support custom temperature
+        completion_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": False,
+            **kwargs
+        }
+
+        if is_reasoning_model(self.model):
+            # Reasoning models only support temperature=1 (or no temperature param)
+            # Don't pass temperature at all - let the API use its default
+            print(f"[LLM] Reasoning model detected ({self.model}) - dropping temperature param")
+        else:
+            completion_kwargs["temperature"] = temperature
+
         try:
-            response = await acompletion(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=False,
-                **kwargs
-            )
+            response = await acompletion(**completion_kwargs)
 
             # Extract the completion text
             content = response.choices[0].message.content
@@ -264,16 +291,23 @@ class LLMProvider:
         **kwargs: Any
     ) -> AsyncGenerator[str, None]:
         self._validate_messages(messages)
-        
+
+        # Handle reasoning models
+        completion_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": True,
+            **kwargs
+        }
+
+        if is_reasoning_model(self.model):
+            print(f"[LLM Stream] Reasoning model detected ({self.model}) - dropping temperature param")
+        else:
+            completion_kwargs["temperature"] = temperature
+
         try:
-            response = await acompletion(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-                **kwargs
-            )
+            response = await acompletion(**completion_kwargs)
             
             # Stream the chunks
             async for chunk in response:
@@ -302,16 +336,23 @@ class LLMProvider:
         # Generate unique call ID for tracking
         api_call_id = str(uuid4())
 
+        # Handle reasoning models
+        completion_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "stream": False,
+            **kwargs
+        }
+
+        if is_reasoning_model(self.model):
+            print(f"[LLM Tools] Reasoning model detected ({self.model}) - dropping temperature param")
+        else:
+            completion_kwargs["temperature"] = temperature
+
         try:
-            response = await acompletion(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=False,
-                **kwargs
-            )
+            response = await acompletion(**completion_kwargs)
 
             # Log token usage and cost
             if hasattr(response, 'usage') and response.usage:
