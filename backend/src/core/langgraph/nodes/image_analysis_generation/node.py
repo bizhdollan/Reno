@@ -256,6 +256,11 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
             # Get project_id for event broadcasting
             project_id_for_events = state.get("project_id")
 
+            # Emit analysis_start event for SSE streaming
+            if project_id_for_events:
+                from src.core.services.event_broadcaster import emit_analysis_start
+                await emit_analysis_start(project_id_for_events, len(new_image_urls))
+
             # Analyze all images in parallel (with progress events)
             image_analyses = await analyze_images_parallel(
                 image_urls=new_image_urls,
@@ -321,6 +326,16 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                     print(f"[image_analysis] Stored {len(image_analyses)} analyses in DB")
                 except Exception as e:
                     print(f"[image_analysis] DB storage failed (continuing with state): {e}")
+
+            # Emit analysis_complete event for SSE streaming
+            if project_id_for_events:
+                from src.core.services.event_broadcaster import emit_analysis_complete
+                # Get categories found from analysis
+                categories_found = list(extracted_data.keys()) if extracted_data else []
+                search_insights_dict = None
+                if extracted_data.get("search_context"):
+                    search_insights_dict = extracted_data["search_context"]
+                await emit_analysis_complete(project_id_for_events, categories_found, search_insights_dict)
 
             # NEW: Trigger smart Tavily search with image insights
             # This replaces the generic search that ran on zip code entry

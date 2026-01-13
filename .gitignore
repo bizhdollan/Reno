@@ -334,3 +334,5 @@ latest_idea.md
 *.json
 tavily_cleaned_content/
 tavily_raw_content/
+docs/research/targeted-image-editing-segmentation-research.md
+backend/tests/bedroom.webp

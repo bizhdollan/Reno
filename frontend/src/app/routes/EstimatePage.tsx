@@ -1426,6 +1426,7 @@ export default function EstimatePage() {
   // Context gathering state (for SSE streaming during image analysis)
   const [isGatheringContext, setIsGatheringContext] = useState(false);
   const [contextReady, setContextReady] = useState(true);
+  const [isSendingImages, setIsSendingImages] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1503,20 +1504,6 @@ export default function EstimatePage() {
       return () => clearTimeout(timeout);
     }
   }, [isGatheringContext, contextReady]);
-
-  // Handler for context ready callback
-  const handleContextReady = useCallback(() => {
-    setIsGatheringContext(false);
-    setContextReady(true);
-  }, []);
-
-  // Handler for context error
-  const handleContextError = useCallback((errorMessage: string) => {
-    console.error("[ContextProgress] Error:", errorMessage);
-    // Still mark as ready so user can continue (graceful degradation)
-    setIsGatheringContext(false);
-    setContextReady(true);
-  }, []);
 
   // Add file to upload with video support
   const addFileToUpload = useCallback(async (file: File, thumbnail?: string, duration?: number) => {
@@ -1673,7 +1660,7 @@ export default function EstimatePage() {
     }
 
     setMessages((prev) => [...prev, { role: "user", content: displayContent, timestamp: new Date().toISOString() }]);
-    
+
     // Clean up previews
     pendingFiles.forEach((f) => {
       if (f.preview.startsWith('blob:')) {
@@ -1681,6 +1668,15 @@ export default function EstimatePage() {
       }
     });
     setPendingFiles([]);
+
+    // TRIGGER CONTEXT PROGRESS when sending images
+    // This shows the progress UI before/during the request
+    if (hasImages) {
+      console.log("[sendMessage] Triggering context progress for image upload, projectId:", projectId);
+      setIsSendingImages(true);
+      setIsGatheringContext(true);
+      setContextReady(false);
+    }
 
     try {
       const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: messageContent }) });
@@ -1735,7 +1731,10 @@ export default function EstimatePage() {
       } else {
         setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
       }
-    } finally { setIsSending(false); }
+    } finally {
+      setIsSending(false);
+      setIsSendingImages(false);
+    }
   }, [isSending, input, pendingFiles, projectId]);
 
   const handleSelectTier = useCallback((tierId: string) => { sendMessage(`I select the ${tierId} tier`); }, [sendMessage]);
@@ -1743,11 +1742,9 @@ export default function EstimatePage() {
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      // Block sending during context gathering
-      if (isGatheringContext && !contextReady) return;
       sendMessage();
     }
-  }, [sendMessage, isGatheringContext, contextReady]);
+  }, [sendMessage]);
 
   const isCompleted = projectState?.current_stage === "completed";
   const hasUploadingFiles = pendingFiles.some((f) => f.uploading);
@@ -1851,18 +1848,9 @@ export default function EstimatePage() {
             <AnimatePresence>
               {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
             </AnimatePresence>
-            {isSending && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
 
-            {/* Context Progress Streaming UI */}
-            <AnimatePresence>
-              {isGatheringContext && !contextReady && projectId && projectId !== "new" && (
-                <ContextProgress
-                  projectId={projectId}
-                  onContextReady={handleContextReady}
-                  onError={handleContextError}
-                />
-              )}
-            </AnimatePresence>
+            {/* Typing indicator - shown when sending non-image messages */}
+            {isSending && !isSendingImages && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
 
             <div ref={messagesEndRef} />
           </div>
@@ -1878,6 +1866,22 @@ export default function EstimatePage() {
               <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700">
                 <X size={16} />
               </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Context Progress - STICKY above input, loops until response arrives */}
+      <AnimatePresence>
+        {isSendingImages && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="flex-shrink-0 px-3 sm:px-4 pb-2"
+          >
+            <div className="max-w-4xl mx-auto">
+              <ContextProgress />
             </div>
           </motion.div>
         )}
@@ -1904,7 +1908,7 @@ export default function EstimatePage() {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder={isGatheringContext && !contextReady ? "Type while we analyze your space..." : "Type your message..."}
+                  placeholder={isSendingImages ? "Analyzing your images..." : "Type your message..."}
                   disabled={isSending}
                   rows={1}
                   className="w-full resize-none rounded-xl border border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-800 px-3 py-2 sm:px-4 sm:py-3 text-sm text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent disabled:opacity-50 disabled:bg-navy-50 dark:disabled:bg-navy-900"
@@ -1912,10 +1916,10 @@ export default function EstimatePage() {
               </div>
               <motion.button
                 onClick={() => sendMessage()}
-                disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles) || (isGatheringContext && !contextReady)}
+                disabled={isSending || hasUploadingFiles || (!input.trim() && !hasUploadedFiles)}
                 whileTap={{ scale: 0.95 }}
                 className="flex-shrink-0 p-2 sm:p-3 bg-gradient-to-r from-amber-500 to-amber-400 text-white rounded-xl shadow-lg shadow-amber-500/25 hover:shadow-xl hover:shadow-amber-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                title={isGatheringContext && !contextReady ? "Gathering context..." : "Send message"}
+                title={isSending ? "Processing..." : "Send message"}
               >
                 <Send size={18} className="sm:w-5 sm:h-5" />
               </motion.button>

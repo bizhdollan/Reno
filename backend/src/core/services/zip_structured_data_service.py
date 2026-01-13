@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 # Event broadcasting for SSE
 from src.core.services.event_broadcaster import (
+    emit_search_start,
     emit_search_query,
     emit_search_result,
     emit_search_complete,
@@ -777,6 +778,10 @@ async def _fetch_tavily_async(
     loop = asyncio.get_event_loop()
     all_results: List[TavilyResult] = []
     total_queries = len(queries)
+
+    # Emit search_start event for SSE streaming
+    if project_id and queries:
+        await emit_search_start(project_id, queries)
 
     async def search_query(q: str, idx: int) -> List[TavilyResult]:
         try:
