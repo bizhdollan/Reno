@@ -13,7 +13,10 @@ from typing import Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
 
+from src.core.logger import get_logger
 from src.db.models import GenerationHistory, ImageAnalysis, PerspectiveChange
+
+logger = get_logger(__name__)
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.nodes.image_analysis_generation.image_helpers import load_image_as_base64
 from .session_cache import SessionCache
@@ -67,7 +70,7 @@ class GenerationService:
         if not analysis:
             raise ValueError(f"ImageAnalysis not found: {image_analysis_id}")
 
-        print(f"[GenerationService] Generating initial image for project {analysis.project_id}")
+        logger.info(f"[GenerationService] Generating initial image for project {analysis.project_id}")
 
         # Build prompt
         prompt = self._build_generation_prompt(
@@ -104,7 +107,7 @@ class GenerationService:
         # Cache the generation
         self.cache.set_generation(gen.id, gen)
 
-        print(f"[GenerationService] Initial generation complete: {gen.id}")
+        logger.info(f"[GenerationService] Initial generation complete: {gen.id}")
         return gen
 
     async def generate_additive(
@@ -136,7 +139,7 @@ class GenerationService:
         if not prev_gen.result_image_url:
             raise ValueError("Previous generation has no result image")
 
-        print(f"[GenerationService] Generating additive on {previous_generation_id}")
+        logger.info(f"[GenerationService] Generating additive on {previous_generation_id}")
 
         # Build prompt based on whether this is partial or full regeneration
         if regional_scope:
@@ -192,7 +195,7 @@ class GenerationService:
         # Cache the generation
         self.cache.set_generation(gen.id, gen)
 
-        print(f"[GenerationService] Additive generation complete: {gen.id}")
+        logger.info(f"[GenerationService] Additive generation complete: {gen.id}")
         return gen
 
     async def generate_restart(
@@ -221,7 +224,7 @@ class GenerationService:
         if not analysis:
             raise ValueError(f"ImageAnalysis not found: {original_image_analysis_id}")
 
-        print(f"[GenerationService] Restarting from original image")
+        logger.info(f"[GenerationService] Restarting from original image")
 
         # Build prompt
         prompt = self._build_generation_prompt(
@@ -256,7 +259,7 @@ class GenerationService:
         # Cache the generation
         self.cache.set_generation(gen.id, gen)
 
-        print(f"[GenerationService] Restart generation complete: {gen.id}")
+        logger.info(f"[GenerationService] Restart generation complete: {gen.id}")
         return gen
 
     async def _generate_image(self, image_data: str, prompt: str) -> dict:

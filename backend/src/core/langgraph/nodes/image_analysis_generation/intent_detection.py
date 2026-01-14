@@ -4,7 +4,10 @@ Intent detection and classification functions.
 
 import json
 
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 from src.core.langgraph.utils import parse_json
 from src.core.langgraph.prompts import (
     ENHANCED_INTENT_CLASSIFIER_PROMPT,
@@ -333,9 +336,7 @@ Temperature Range: {climate.get('temp_range_f', {}).get('min', 'N/A')}°F - {cli
         max_tokens=6000,  # Increased to support 5+ options (one per style)
         operation_type="expert_suggestions"
     )
-    print("="*80)
-    print(response)
-    print("="*80)
+    logger.debug(f"[expert_suggestions] Response: {response[:500]}..." if len(response) > 500 else f"[expert_suggestions] Response: {response}")
 
     try:
         return parse_json(response)
@@ -652,4 +653,113 @@ async def parse_multi_image_feedback(
             "image_feedback": [],
             "applies_to_all": True,
             "general_feedback": user_feedback
+        }
+
+
+async def detect_edit_mode(
+    user_feedback: str,
+    previous_changes: list[str] | None = None,
+    image_url: str | None = None
+) -> dict:
+    """
+    Intelligently detect the type of edit operation the user is requesting.
+
+    Edit modes:
+    - add: User wants to ADD new elements (e.g., "add a window", "include pendant lights")
+    - modify: User wants to CHANGE/UPDATE existing elements (e.g., "change floor to marble", "make it darker")
+    - remove: User wants to REMOVE/DELETE unwanted elements (e.g., "remove the arched doorway", "get rid of the rug")
+    - correct: User is CORRECTING AI mistakes/hallucinations (e.g., "that doorway shouldn't be there", "I didn't ask for that")
+    - approve: User approves and wants to continue (e.g., "looks good", "perfect", "continue")
+
+    Args:
+        user_feedback: The user's feedback message
+        previous_changes: List of changes made in previous generation (for context)
+        image_url: Optional URL to the image being discussed (for VLM analysis if needed)
+
+    Returns:
+        dict with keys:
+        - edit_mode: "add" | "modify" | "remove" | "correct" | "approve" | "mixed"
+        - confidence: 0.0 to 1.0
+        - elements: list of specific elements being targeted
+        - reasoning: brief explanation
+        - prompt_strategy: recommended approach for the prompt
+    """
+    provider = LLMProvider.for_llm()
+
+    # Build context about previous changes
+    changes_context = ""
+    if previous_changes:
+        changes_context = f"""
+Previous changes made to this image:
+{chr(10).join(f'- {c}' for c in previous_changes)}
+"""
+
+    prompt = f"""Analyze this user feedback about a generated renovation image.
+
+User's feedback: "{user_feedback}"
+{changes_context}
+
+Determine the edit operation type and extract specific elements.
+
+EDIT MODES:
+- "add": User wants NEW elements added (keywords: add, include, put, insert, create, want, need)
+- "modify": User wants to CHANGE existing elements (keywords: change, make, update, different, switch, replace with)
+- "remove": User wants elements DELETED (keywords: remove, delete, get rid of, take out, no more, don't want)
+- "correct": User is fixing AI MISTAKES - elements that shouldn't have been added (keywords: shouldn't be there, wasn't asked, didn't request, wrong, mistake, hallucination, I didn't say)
+- "approve": User is SATISFIED and wants to continue (keywords: looks good, perfect, great, continue, proceed, approve, love it)
+- "mixed": Multiple edit types in one request
+
+IMPORTANT DISTINCTION:
+- "remove" = User acknowledges element EXISTS but wants it GONE
+- "correct" = User says element SHOULDN'T EXIST (AI added it by mistake)
+
+Return JSON only:
+{{
+    "edit_mode": "add" | "modify" | "remove" | "correct" | "approve" | "mixed",
+    "confidence": 0.0 to 1.0,
+    "elements": ["list", "of", "specific", "elements", "mentioned"],
+    "reasoning": "brief explanation of why this mode was detected",
+    "sub_operations": [
+        {{
+            "mode": "add" | "modify" | "remove" | "correct",
+            "element": "specific element",
+            "details": "what to do with this element"
+        }}
+    ],
+    "prompt_strategy": "recommended_approach"
+}}
+
+Prompt strategies:
+- "additive": Add new elements while preserving everything else
+- "replacement": Replace/modify specific elements
+- "removal": Remove elements completely (set explicit constraints)
+- "correction": Undo AI mistake and regenerate without the hallucinated element
+- "preserve": Keep current design, proceed to next step"""
+
+    response = await provider.complete(
+        messages=[
+            {
+                "role": "system",
+                "content": "You analyze image editing feedback to determine operation type. Return JSON only."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.0,
+        max_tokens=400
+    )
+
+    try:
+        result = parse_json(response)
+        logger.info(f"[detect_edit_mode] Detected: {result.get('edit_mode')} (confidence: {result.get('confidence')})")
+        logger.info(f"[detect_edit_mode] Elements: {result.get('elements')}")
+        return result
+    except:
+        # Default fallback - treat as modify if unclear
+        return {
+            "edit_mode": "modify",
+            "confidence": 0.5,
+            "elements": [],
+            "reasoning": "Failed to parse, defaulting to modify",
+            "sub_operations": [],
+            "prompt_strategy": "replacement"
         }

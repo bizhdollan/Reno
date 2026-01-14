@@ -5,7 +5,10 @@ Image analysis functions for extracting data from images.
 import asyncio
 import json
 
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 from src.core.langgraph.state import ImageAnalysis
 from src.core.langgraph.utils import parse_json
 from src.core.langgraph.config import (
@@ -110,7 +113,7 @@ async def analyze_single_image(
     project_id: str | None = None
 ) -> ImageAnalysis:
     """Analyze a single image and return structured analysis."""
-    print(f"[image_analysis] Starting analysis for image {image_index + 1}: {image_url}")
+    logger.info(f"[image_analysis] Starting analysis for image {image_index + 1}: {image_url}")
 
     # Emit progress event
     if project_id:
@@ -157,11 +160,11 @@ async def analyze_single_image(
     try:
         analysis = parse_json(response)
     except Exception as e:
-        print(f"[image_analysis] Failed to parse response for image {image_index + 1}: {e}")
+        logger.info(f"[image_analysis] Failed to parse response for image {image_index + 1}: {e}")
         analysis = {}
 
     categories_found = [k for k in analysis.keys() if analysis.get(k)]
-    print(f"[image_analysis] Completed image {image_index + 1}: found {categories_found}")
+    logger.info(f"[image_analysis] Completed image {image_index + 1}: found {categories_found}")
 
     # Emit completion for this image
     if project_id:
@@ -323,7 +326,7 @@ async def apply_user_correction(
     try:
         return parse_json(response)
     except Exception as e:
-        print(f"[image_analysis] Failed to parse correction: {e}")
+        logger.info(f"[image_analysis] Failed to parse correction: {e}")
         return current_data
 
 
@@ -470,13 +473,13 @@ Return valid JSON only, no markdown."""
             # Generate default must_not_add based on visible_elements
             result["must_not_add"] = _generate_default_must_not_add(result.get("visible_elements", {}))
 
-        print(f"[features_detection] Scope: {result.get('image_scope', {}).get('frame_type', 'unknown')}")
-        print(f"[features_detection] Must retain: {len(result.get('must_retain', []))} items")
-        print(f"[features_detection] Must NOT add: {result.get('must_not_add', [])}")
+        logger.info(f"[features_detection] Scope: {result.get('image_scope', {}).get('frame_type', 'unknown')}")
+        logger.info(f"[features_detection] Must retain: {len(result.get('must_retain', []))} items")
+        logger.info(f"[features_detection] Must NOT add: {result.get('must_not_add', [])}")
 
         return result
     except Exception as e:
-        print(f"[features_detection] Failed to parse response: {e}")
+        logger.info(f"[features_detection] Failed to parse response: {e}")
         return {
             "visible_elements": {},
             "image_scope": {

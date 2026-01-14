@@ -11,7 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from sqlalchemy.orm import Session
 from typing import Optional
 
+from src.core.logger import get_logger
 from src.db.database import get_db
+
+logger = get_logger(__name__)
 from src.db.models import Project, Unlock
 from src.db.schemas import (
     UnlockInitiateRequest,
@@ -166,7 +169,7 @@ async def save_contractor_details(
                 contractor_company=data.contractor_company
             )
     except Exception as e:
-        print(f"⚠️ Email notification failed: {e}")
+        logger.warning(f"Email notification failed: {e}")
         # Don't fail the request if email fails
     
     # Load project for response
@@ -227,7 +230,7 @@ async def get_unlock_by_session(
             unlock.contractor_email_sent = True
             db.commit()
         except Exception as e:
-            print(f"⚠️ Contractor email failed: {e}")
+            logger.warning(f"Contractor email failed: {e}")
 
     # Notify homeowner once if payment completed and not notified.
     if unlock.payment_status == "completed" and project.homeowner_email and not unlock.homeowner_notified:
@@ -241,7 +244,7 @@ async def get_unlock_by_session(
             unlock.homeowner_notified = True
             db.commit()
         except Exception as e:
-            print(f"⚠️ Homeowner email failed: {e}")
+            logger.warning(f"Homeowner email failed: {e}")
 
     unlock_dict = {
         **UnlockResponse.model_validate(unlock).model_dump(),
@@ -325,9 +328,9 @@ async def mark_project_complete_contractor(
         from datetime import datetime, UTC
         project.status = "completed"
         project.completed_at = datetime.now(UTC)
-        print(f"[complete] Project {project.token} fully completed by both parties")
+        logger.info(f"[complete] Project {project.token} fully completed by both parties")
     else:
-        print(f"[complete] Contractor marked complete for {project.token}, waiting for homeowner")
+        logger.info(f"[complete] Contractor marked complete for {project.token}, waiting for homeowner")
 
     db.commit()
     db.refresh(project)
@@ -366,7 +369,7 @@ async def stripe_webhook(
             signature=stripe_signature or ""
         )
     except Exception as e:
-        print(f"⚠️ Webhook verification failed: {e}")
+        logger.warning(f"Webhook verification failed: {e}")
         # In test mode, continue anyway
         import json
         try:
@@ -384,7 +387,7 @@ async def stripe_webhook(
         # Get unlock token from metadata
         unlock_token = session.get('metadata', {}).get('unlock_token')
         if not unlock_token:
-            print("⚠️ No unlock_token in metadata")
+            logger.warning("No unlock_token in metadata")
             return {"status": "error", "message": "Missing unlock_token"}
         
         db = SessionLocal()
@@ -392,13 +395,13 @@ async def stripe_webhook(
             # Get unlock record
             unlock = db.query(Unlock).filter(Unlock.unlock_token == unlock_token).first()
             if not unlock:
-                print(f"⚠️ Unlock not found: {unlock_token}")
+                logger.warning(f"Unlock not found: {unlock_token}")
                 return {"status": "error", "message": "Unlock not found"}
             
             # Get project
             project = db.query(Project).filter(Project.id == unlock.project_id).first()
             if not project:
-                print(f"⚠️ Project not found: {unlock.project_id}")
+                logger.warning(f"Project not found: {unlock.project_id}")
                 return {"status": "error", "message": "Project not found"}
             
             # Update unlock
@@ -411,8 +414,8 @@ async def stripe_webhook(
             project.status = "unlocked"
             
             db.commit()
-            
-            print(f"✅ Payment succeeded for {unlock_token}")
+
+            logger.info(f"Payment succeeded for {unlock_token}")
             
             # Send emails
             try:
@@ -440,11 +443,11 @@ async def stripe_webhook(
                     unlock.homeowner_notified = True
 
                 db.commit()
-                print(f"✅ Emails sent for {unlock_token}")
+                logger.info(f"Emails sent for {unlock_token}")
 
             except Exception as e:
                 # Don't fail webhook if emails fail
-                print(f"⚠️ Email failed but payment processed: {e}")
+                logger.warning(f"Email failed but payment processed: {e}")
             
             return {"status": "success"}
         
@@ -455,10 +458,10 @@ async def stripe_webhook(
         # Payment session expired
         session = event.get('data', {}).get('object', {})
         unlock_token = session.get('metadata', {}).get('unlock_token')
-        print(f"⚠️ Checkout session expired: {unlock_token}")
+        logger.warning(f"Checkout session expired: {unlock_token}")
         return {"status": "expired"}
-    
+
     else:
         # Other events we don't care about
-        print(f"ℹ️ Unhandled event type: {event_type}")
+        logger.debug(f"Unhandled event type: {event_type}")
         return {"status": "ignored"}

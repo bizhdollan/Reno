@@ -7,6 +7,10 @@ import os
 from typing import Optional
 from pathlib import Path
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 # Initialize Resend only if API key is available
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
@@ -43,7 +47,7 @@ class EmailService:
             Response dict from Resend API
         """
         if not RESEND_API_KEY or resend is None:
-            print(f"⚠️ RESEND_API_KEY not set, skipping email to {to}")
+            logger.warning(f"RESEND_API_KEY not set, skipping email to {to}")
             return {"id": "skipped", "message": "Email service not configured"}
         
         try:
@@ -56,12 +60,12 @@ class EmailService:
             if text:
                 params["text"] = text
             response = resend.Emails.send(params)
-            print(f"✅ Email sent to {to}: {response.get('id', 'unknown')}")
+            logger.info(f"Email sent to {to}: {response.get('id', 'unknown')}")
             return response
         except Exception as e:
             # Log error but don't raise - allow endpoint to continue
             error_msg = str(e)
-            print(f"⚠️ Email failed to {to}: {error_msg}")
+            logger.error(f"Email failed to {to}: {error_msg}", exc_info=True)
             # Return error dict instead of raising
             return {"id": "error", "message": error_msg}
     

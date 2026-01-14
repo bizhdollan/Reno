@@ -16,12 +16,19 @@ from pathlib import Path
 import uvicorn
 from sqlalchemy import text
 
+# Initialize logging FIRST before other imports
+from src.core.logger import setup_logging, get_logger
+setup_logging()
+
+logger = get_logger(__name__)
+
 from src.api.v1.chat import router as chat_router
 from src.api.v1.files import router as files_router
 from src.api.v1.projects import router as projects_router
 from src.api.v1.marketplace import router as marketplace_router
 from src.api.v1.unlock import router as unlock_router
 from src.api.v1.stream import router as stream_router
+from src.api.v1.entities import router as entities_router
 from src.db.database import engine, SessionLocal
 
 
@@ -29,20 +36,21 @@ from src.db.database import engine, SessionLocal
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup/shutdown"""
     # Startup
+    logger.info("Application startup initiated")
     try:
         # Test database connection
         db = SessionLocal()
         db.execute(text("SELECT 1"))
         db.close()
-        print("✅ Database connection successful")
+        logger.info("Database connection successful")
     except Exception as e:
-        print(f"⚠️ Database connection failed: {e}")
-        print("   Make sure PostgreSQL is running: docker-compose up -d")
-    
+        logger.error(f"Database connection failed: {e}", exc_info=True)
+        logger.warning("Make sure PostgreSQL is running: docker-compose up -d")
+
     yield
-    
+
     # Shutdown (cleanup if needed)
-    print("🔄 Shutting down...")
+    logger.info("Application shutting down")
 
 
 app = FastAPI(
@@ -68,6 +76,7 @@ app.include_router(projects_router)
 app.include_router(marketplace_router)
 app.include_router(unlock_router)
 app.include_router(stream_router)
+app.include_router(entities_router)
 
 # Ensure images directory exists
 IMAGES_DIR = Path("images")
@@ -100,9 +109,11 @@ def health_check():
         db.execute(text("SELECT 1"))
         db.close()
         db_status = "connected"
+        logger.debug("Health check: Database connected")
     except Exception as e:
         db_status = f"error: {str(e)}"
-    
+        logger.warning(f"Health check: Database error - {e}")
+
     return {
         "status": "healthy" if db_status == "connected" else "degraded",
         "service": "renovationtech-backend",

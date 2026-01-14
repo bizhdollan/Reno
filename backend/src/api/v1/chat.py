@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 import httpx
 
+from src.core.logger import get_logger
 from src.core.langgraph import create_initial_state, run_conversation
+
+logger = get_logger(__name__)
 from src.core.langgraph.graph import get_message_content
 from src.core.langgraph.state import ProjectState, get_thinking_status, get_stage_progress
 from src.db.database import get_db
@@ -40,6 +43,10 @@ class ChatMessage(BaseModel):
     state: Optional[ProjectState] = Field(
         None,
         description="Optional prior state; if omitted we use the server-stored state for the project or start fresh",
+    )
+    selected_image_url: Optional[str] = Field(
+        None,
+        description="URL of the currently selected canvas image for context in image editing",
     )
 
 
@@ -135,7 +142,7 @@ async def chat(
     if not project_id or project_id == "new":
         # Generate new project token
         project_id = generate_token("PRJ")
-        print(f"[chat] Creating new project with token: {project_id}")
+        logger.info(f"[chat] Creating new project with token: {project_id}")
     
     # Load or create project in database
     project = db.query(Project).filter(Project.token == project_id).first()
@@ -149,7 +156,7 @@ async def chat(
         db.add(project)
         db.commit()
         db.refresh(project)
-        print(f"[chat] Created new project in database: {project.id}")
+        logger.info(f"[chat] Created new project in database: {project.id}")
     
     # Load conversation state from database
     conv_state = db.query(ConversationState).filter(
@@ -163,24 +170,27 @@ async def chat(
     else:
         state = create_initial_state()
 
-    print(
+    logger.info(
         f"[chat] incoming project_id={project_id} (db_id={project.id}) | "
         f"message_type={'list' if isinstance(payload.message, list) else 'str'} | "
         f"state_current_stage={state.get('current_stage')} | "
         f"state_source={'database' if conv_state else 'fresh'}"
     )
     # Log raw user input for debugging
-    print(f"[chat] user_input={payload.message!r}")
+    logger.info(f"[chat] user_input={payload.message!r}")
+    if payload.selected_image_url:
+        logger.info(f"[chat] selected_image_url={payload.selected_image_url}")
 
     try:
         new_state, assistant_reply = await run_conversation(
             project_id=project_id,
             user_message=payload.message,
             state=state,
+            selected_image_url=payload.selected_image_url,
         )
     except httpx.TimeoutException as exc:
         # LLM/API timeout
-        print(f"[chat] Timeout error: {exc}")
+        logger.info(f"[chat] Timeout error: {exc}")
         return JSONResponse(
             status_code=504,
             content=ChatError(
@@ -193,7 +203,7 @@ async def chat(
     except httpx.HTTPStatusError as exc:
         # HTTP errors from external APIs
         status_code = exc.response.status_code
-        print(f"[chat] HTTP error {status_code}: {exc}")
+        logger.info(f"[chat] HTTP error {status_code}: {exc}")
 
         if status_code == 429:
             # Rate limit
@@ -228,7 +238,7 @@ async def chat(
             )
     except ValidationError as exc:
         # Pydantic validation errors
-        print(f"[chat] Validation error: {exc}")
+        logger.info(f"[chat] Validation error: {exc}")
         return JSONResponse(
             status_code=422,
             content=ChatError(
@@ -239,8 +249,8 @@ async def chat(
         )
     except SQLAlchemyError as exc:
         # Database errors
-        print(f"[chat] Database error: {exc}")
-        traceback.print_exc()
+        logger.info(f"[chat] Database error: {exc}")
+        logger.error("Full traceback", exc_info=True)
         return JSONResponse(
             status_code=503,
             content=ChatError(
@@ -252,8 +262,8 @@ async def chat(
         )
     except Exception as exc:
         # Catch-all for unexpected errors
-        print(f"[chat] Unexpected error: {exc}")
-        traceback.print_exc()
+        logger.info(f"[chat] Unexpected error: {exc}")
+        logger.error("Full traceback", exc_info=True)
 
         # Check for common LLM error patterns in the message
         error_msg = str(exc).lower()
@@ -307,7 +317,7 @@ async def chat(
         serializable_messages.append({"role": role or "assistant", "content": content})
     serializable_state["messages"] = serializable_messages
 
-    print(
+    logger.info(
         "[chat] outgoing "
         f"current_stage={serializable_state.get('current_stage')} | "
         f"title={serializable_state.get('project_title')} | "
@@ -316,13 +326,13 @@ async def chat(
         f"assistant_reply_len={len(assistant_reply or '')}"
     )
     # Log assistant reply for debugging
-    print(f"[chat] assistant_reply={assistant_reply!r}")
+    logger.info(f"[chat] assistant_reply={assistant_reply!r}")
 
     # Save state to database
     if conv_state:
         # Update existing state
         conv_state.state = serializable_state
-        print(f"[chat] Updated conversation state in database")
+        logger.info(f"[chat] Updated conversation state in database")
     else:
         # Create new state
         conv_state = ConversationState(
@@ -330,7 +340,7 @@ async def chat(
             state=serializable_state
         )
         db.add(conv_state)
-        print(f"[chat] Created conversation state in database")
+        logger.info(f"[chat] Created conversation state in database")
     
     # Update project fields from state if available
     if serializable_state.get('project_type'):
@@ -401,7 +411,7 @@ async def chat(
     serializable_state["internal_project_id"] = str(project.id)
 
     db.commit()
-    print(f"[chat] Saved to database: project_status={project.status}")
+    logger.info(f"[chat] Saved to database: project_status={project.status}")
 
     # Get thinking status and stage progress for frontend
     thinking_status = get_thinking_status(serializable_state)

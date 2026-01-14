@@ -19,6 +19,10 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, Optional
 from uuid import UUID
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass
 class ContextEvent:
@@ -59,7 +63,7 @@ async def broadcast(
         if key in _event_queues:
             event = ContextEvent(event_type=event_type, data=data)
             await _event_queues[key].put(event.to_dict())
-            print(f"[event_broadcaster] Broadcast {event_type} to {key}")
+            logger.debug(f"[event_broadcaster] Broadcast {event_type} to {key}")
 
 
 async def subscribe(
@@ -115,7 +119,7 @@ async def subscribe(
         async with _event_queue_lock:
             if key in _event_queues:
                 del _event_queues[key]
-                print(f"[event_broadcaster] Cleaned up queue for {key}")
+                logger.debug(f"[event_broadcaster] Cleaned up queue for {key}")
 
 
 async def has_subscribers(project_id: str | UUID) -> bool:

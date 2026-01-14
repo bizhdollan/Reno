@@ -11,6 +11,8 @@ Organized by functionality:
 from src.core.langgraph.prompts.image_generation import (
     build_image_generation_prompt,
     build_image_regeneration_prompt,
+    build_edit_mode_prompt,
+    build_selected_image_prompt,
 )
 from src.core.langgraph.prompts.intent_classification import (
     ENHANCED_INTENT_CLASSIFIER_PROMPT,
@@ -34,6 +36,8 @@ __all__ = [
     # Image generation
     "build_image_generation_prompt",
     "build_image_regeneration_prompt",
+    "build_edit_mode_prompt",
+    "build_selected_image_prompt",
     # Intent classification
     "ENHANCED_INTENT_CLASSIFIER_PROMPT",
     "CONVERSATION_TYPE_CLASSIFIER_PROMPT",

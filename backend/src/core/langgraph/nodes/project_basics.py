@@ -6,7 +6,10 @@ Smart extraction - infers what it can, only asks for missing fields.
 User can edit until they upload an image (which triggers stage transition).
 """
 
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 from src.core.langgraph.state import ProjectState
 from src.core.langgraph.utils import get_latest_user_message, parse_json
 from src.core.services.location_service import validate_us_zip_code, extract_location_from_zip
@@ -126,8 +129,8 @@ async def project_basics_node(state: ProjectState) -> dict:
     zipcode = state.get("zip_code")
     
     # DEBUG logging
-    print(f"[project_basics] INPUT: title={title} | type={ptype} | zip={zipcode}")
-    print(f"[project_basics] user_message={user_message!r} | has_images={len(image_urls) > 0}")
+    logger.info(f"[project_basics] INPUT: title={title} | type={ptype} | zip={zipcode}")
+    logger.info(f"[project_basics] user_message={user_message!r} | has_images={len(image_urls) > 0}")
     
     # Check if user uploaded images -> transition to next stage
     if image_urls:
@@ -148,7 +151,7 @@ async def project_basics_node(state: ProjectState) -> dict:
         updates["messages"] = []
         # Store the image URLs for the next node to process
         updates["_pending_images"] = image_urls
-        print(f"[project_basics] Transitioning to image_analysis with {len(image_urls)} pending images")
+        logger.info(f"[project_basics] Transitioning to image_analysis with {len(image_urls)} pending images")
         return updates
     
     # First turn - no user message yet
@@ -168,7 +171,7 @@ async def project_basics_node(state: ProjectState) -> dict:
     edit_value = extraction.get("edit_value")
     
     # DEBUG logging
-    print(f"[project_basics] EXTRACTION: {extraction}")
+    logger.info(f"[project_basics] EXTRACTION: {extraction}")
     
     # Handle edit requests (only when basics are complete)
     if wants_edit and edit_field and not get_missing_fields(state):
@@ -181,14 +184,14 @@ async def project_basics_node(state: ProjectState) -> dict:
         if new_value:
             updates[actual_field] = new_value
             ptype_for_msg = new_value if actual_field == "project_type" else state.get("project_type", "space")
-            response = f"Updated! Here's your project info:\n\n{format_summary({**state, actual_field: new_value})}\n\nUpload images of your {ptype_for_msg} to continue, or let me know if anything needs to change."
+            response = f"Updated! Here's your project info:\n\n{format_summary({**state, actual_field: new_value})}\n\nUpload images of your {ptype_for_msg} to continue."
         else:
             field_names = {"project_title": "project name", "project_type": "type", "zip_code": "zip code"}
             response = f"What would you like to change the {field_names.get(actual_field, 'field')} to?"
         
         updates["messages"] = [{"role": "assistant", "content": response}]
         updates["awaiting_user_input"] = True
-        print(f"[project_basics] EDIT HANDLED: {actual_field} = {new_value}")
+        logger.info(f"[project_basics] EDIT HANDLED: {actual_field} = {new_value}")
         return updates
     
     # Apply extracted values
@@ -228,24 +231,24 @@ async def project_basics_node(state: ProjectState) -> dict:
                     try:
                         project = db.query(Project).filter(Project.token == project_id_token).first()
                         if project:
-                            print(f"[project_basics] Starting location prefetch for zip {final_zip} (Tavily deferred until image analysis)")
+                            logger.info(f"[project_basics] Starting location prefetch for zip {final_zip} (Tavily deferred until image analysis)")
                             start_location_prefetch_background(
                                 project_id=project.id,
                                 zip_code=final_zip
                             )
                         else:
-                            print(f"[project_basics] Project not found for token {project_id_token}")
+                            logger.info(f"[project_basics] Project not found for token {project_id_token}")
                     finally:
                         db.close()
                 except Exception as e:
-                    print(f"[project_basics] Failed to start location prefetch: {e}")
+                    logger.info(f"[project_basics] Failed to start location prefetch: {e}")
             else:
-                print(f"[project_basics] Invalid zip code {final_zip}, skipping location prefetch")
+                logger.info(f"[project_basics] Invalid zip code {final_zip}, skipping location prefetch")
 
         response = (
             f"Here's what I have:\n\n"
             f"{format_summary({**state, **updates})}\n\n"
-            f"Upload images of your {ptype_for_msg} to continue, or let me know if anything needs to change."
+            f"Upload images of your {ptype_for_msg} to continue."
         )
     
     elif "project_title" in missing:
@@ -264,8 +267,8 @@ async def project_basics_node(state: ProjectState) -> dict:
         # Fallback
         response = "Let me know any other details or upload images when ready."
     
-    print(f"[project_basics] UPDATES: {updates}")
-    print(f"[project_basics] RESPONSE: {response[:100]}...")
+    logger.info(f"[project_basics] UPDATES: {updates}")
+    logger.info(f"[project_basics] RESPONSE: {response[:100]}...")
     
     updates["messages"] = [{"role": "assistant", "content": response}]
     updates["awaiting_user_input"] = True

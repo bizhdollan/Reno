@@ -254,3 +254,216 @@ def build_image_regeneration_prompt(
 
 **Step 2: GENERATE THE UPDATED IMAGE**
 Regenerate the image incorporating these changes while maintaining all other aspects of the design."""
+
+
+def build_edit_mode_prompt(
+    base_prompt: str,
+    edit_mode_result: dict,
+    user_feedback: str
+) -> str:
+    """
+    Build a prompt dynamically based on the detected edit mode.
+
+    This creates targeted prompts for different edit operations:
+    - add: Focuses on adding new elements while preserving existing
+    - modify: Focuses on changing specific elements
+    - remove: Explicitly instructs to remove elements
+    - correct: Addresses AI hallucination by removing unwanted elements
+
+    Args:
+        base_prompt: The base generation prompt
+        edit_mode_result: Result from detect_edit_mode() function
+        user_feedback: The user's original feedback
+
+    Returns:
+        Formatted prompt string optimized for the edit operation
+    """
+    edit_mode = edit_mode_result.get("edit_mode", "modify")
+    elements = edit_mode_result.get("elements", [])
+    sub_operations = edit_mode_result.get("sub_operations", [])
+    prompt_strategy = edit_mode_result.get("prompt_strategy", "replacement")
+
+    # Build element list string
+    elements_str = ", ".join(elements) if elements else "the mentioned elements"
+
+    if edit_mode == "add" or prompt_strategy == "additive":
+        return f"""{base_prompt}
+
+## ADDITIVE EDIT REQUEST
+
+User wants to ADD: {user_feedback}
+
+**TASK: Add the following elements while preserving EVERYTHING else:**
+{chr(10).join(f'- ADD: {el}' for el in elements) if elements else f'- ADD: {user_feedback}'}
+
+**Step 1: Describe ONLY the additions (2-3 bullet points)**
+• List each new element being added
+• Keep descriptions brief
+
+**Step 2: GENERATE IMAGE with additions**
+- Add the requested new elements
+- PRESERVE all existing renovations and design choices
+- Maintain the same camera angle and room structure
+- Do NOT change anything that wasn't specifically mentioned"""
+
+    elif edit_mode == "remove" or prompt_strategy == "removal":
+        return f"""{base_prompt}
+
+## REMOVAL EDIT REQUEST
+
+User wants to REMOVE: {user_feedback}
+
+**TASK: Remove the following elements completely:**
+{chr(10).join(f'- REMOVE: {el}' for el in elements) if elements else f'- REMOVE: {user_feedback}'}
+
+**CRITICAL CONSTRAINT - DO NOT INCLUDE:**
+{chr(10).join(f'- {el} (USER EXPLICITLY REQUESTED REMOVAL)' for el in elements) if elements else f'- {user_feedback}'}
+
+**Step 1: Describe the removal (1-2 bullet points)**
+• Note what was removed
+• Note what replaced it (if applicable - usually original/empty space)
+
+**Step 2: GENERATE IMAGE without the removed elements**
+- The removed elements should NOT appear in the output
+- Replace removed elements with appropriate alternatives (original wall, empty space, etc.)
+- PRESERVE all other renovations and design choices
+- Maintain the same camera angle and room structure"""
+
+    elif edit_mode == "correct" or prompt_strategy == "correction":
+        return f"""{base_prompt}
+
+## CORRECTION REQUEST - AI MISTAKE FIX
+
+The previous generation included elements that were NOT requested: {user_feedback}
+
+**TASK: Remove the AI-generated mistake and regenerate correctly:**
+{chr(10).join(f'- REMOVE (MISTAKE): {el} - THIS WAS NOT REQUESTED' for el in elements) if elements else f'- REMOVE (MISTAKE): {user_feedback}'}
+
+**CRITICAL - THESE ELEMENTS SHOULD NOT EXIST:**
+{chr(10).join(f'- DO NOT INCLUDE: {el}' for el in elements) if elements else f'- DO NOT INCLUDE elements related to: {user_feedback}'}
+
+**Step 1: Acknowledge the correction (1-2 bullet points)**
+• Note the mistakenly added element being removed
+• Confirm what should appear instead
+
+**Step 2: REGENERATE without the hallucinated elements**
+- Generate a NEW image that does NOT include the mentioned elements
+- These elements were added by mistake and should NOT appear
+- Return to the original room structure where applicable
+- PRESERVE intended renovations (floors, walls, fixtures that WERE requested)"""
+
+    elif edit_mode == "approve" or prompt_strategy == "preserve":
+        # User approves - this shouldn't trigger regeneration, but handle gracefully
+        return f"""## DESIGN APPROVED
+
+The user has approved the current design.
+
+User said: "{user_feedback}"
+
+No changes needed. The current design is accepted."""
+
+    else:  # modify or default
+        return f"""{base_prompt}
+
+## MODIFICATION REQUEST
+
+User feedback: {user_feedback}
+
+**TASK: Modify the following elements:**
+{chr(10).join(f'- {op.get("mode", "modify").upper()}: {op.get("element", "element")} - {op.get("details", "")}' for op in sub_operations) if sub_operations else f'- MODIFY: {user_feedback}'}
+
+**Step 1: Describe the modifications (2-4 bullet points)**
+• List each change being made
+• Be specific about what's changing
+
+**Step 2: GENERATE the modified image**
+- Apply the requested modifications
+- PRESERVE everything not explicitly mentioned
+- Maintain the same camera angle and room structure"""
+
+
+def build_selected_image_prompt(
+    selected_image_url: str,
+    edit_mode_result: dict,
+    user_feedback: str,
+    extracted_data: dict | None = None
+) -> str:
+    """
+    Build a prompt specifically for editing a user-selected image.
+
+    This is used when the user has selected a specific image in the canvas
+    and wants to apply changes to that image.
+
+    Args:
+        selected_image_url: URL of the selected canvas image
+        edit_mode_result: Result from detect_edit_mode() function
+        user_feedback: The user's feedback/request
+        extracted_data: Optional extracted data about the room
+
+    Returns:
+        Formatted prompt string for editing the selected image
+    """
+    edit_mode = edit_mode_result.get("edit_mode", "modify")
+    elements = edit_mode_result.get("elements", [])
+
+    # Build base context
+    base_context = """## EDITING SELECTED IMAGE
+
+You are modifying a specific image that the user has selected.
+This image may be either:
+- An originally uploaded photo of their room
+- A previously generated renovation preview
+
+Your task is to apply the user's requested changes to THIS specific image."""
+
+    # Add room context if available
+    room_context = ""
+    if extracted_data:
+        if extracted_data.get("style", {}).get("overall_style"):
+            room_context += f"\nCurrent style: {extracted_data['style']['overall_style']}"
+        if extracted_data.get("materials"):
+            room_context += f"\nMaterials: {', '.join(m.get('name', '') for m in extracted_data['materials'][:3])}"
+
+    # Build edit-specific instructions
+    edit_instructions = ""
+    if edit_mode == "add":
+        edit_instructions = f"""
+**ADD elements to this image:**
+{chr(10).join(f'• Add: {el}' for el in elements) if elements else f'• Add: {user_feedback}'}
+
+Preserve all existing elements and add the new ones."""
+
+    elif edit_mode == "remove":
+        edit_instructions = f"""
+**REMOVE elements from this image:**
+{chr(10).join(f'• Remove: {el}' for el in elements) if elements else f'• Remove: {user_feedback}'}
+
+The removed elements should NOT appear in the output."""
+
+    elif edit_mode == "correct":
+        edit_instructions = f"""
+**CORRECT AI mistakes in this image:**
+{chr(10).join(f'• Remove (mistake): {el}' for el in elements) if elements else f'• Remove (mistake): {user_feedback}'}
+
+These elements were incorrectly added and should be removed."""
+
+    else:  # modify
+        edit_instructions = f"""
+**MODIFY this image based on feedback:**
+{user_feedback}
+
+Apply the changes while preserving the overall design."""
+
+    return f"""{base_context}
+{room_context}
+
+{edit_instructions}
+
+**CRITICAL CONSTRAINTS:**
+1. Maintain the SAME camera angle as the selected image
+2. Preserve the room structure and boundaries
+3. Only change what was explicitly requested
+4. The output must be recognizable as the same space
+
+**Step 1: Describe changes briefly (2-3 points)**
+**Step 2: Generate the updated image**"""

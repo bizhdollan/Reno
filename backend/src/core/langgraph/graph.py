@@ -75,22 +75,26 @@ def create_graph(checkpointer: str | None = None):
         }
     )
     
-    # image_analysis_generation can loop back or continue to final_review
+    # image_analysis_generation can loop back or continue to final_review/cost_estimation
     def image_analysis_router(state: ProjectState) -> str:
         if state.get("awaiting_user_input", True):
             return "end"
-        # Check if we should go to final_review
+        # Check if we should go to cost_estimation (simplified flow - skip final_review)
+        if state.get("current_stage") == "cost_estimation":
+            return "cost_estimation"
+        # Check if we should go to final_review (legacy flow)
         if state.get("current_stage") == "final_review":
             return "final_review"
         # Otherwise loop back for sub-state processing
         return "continue"
-    
+
     builder.add_conditional_edges(
         "image_analysis_generation",
         image_analysis_router,
         {
             "continue": "image_analysis_generation",
             "final_review": "final_review",
+            "cost_estimation": "cost_estimation",
             "end": END
         }
     )
@@ -134,27 +138,33 @@ graph = create_graph()
 async def run_conversation(
     project_id: str,
     user_message: str | list,
-    state: ProjectState | None = None
+    state: ProjectState | None = None,
+    selected_image_url: str | None = None
 ) -> tuple[ProjectState, str | list]:
     """
     Run a single conversation turn.
-    
+
     Args:
         project_id: Unique project identifier
         user_message: User's message (str or list for multimodal)
         state: Current state (if None, starts fresh)
-    
+        selected_image_url: URL of the currently selected canvas image (for image editing context)
+
     Returns:
         Tuple of (updated_state, assistant_response)
         Response can be str or list (for multimodal/tier_cards)
     """
     if state is None:
         state = create_initial_state()
-    
+
     # Add user message
     state["messages"].append({"role": "user", "content": user_message})
     state["awaiting_user_input"] = False
     state["user_confirmed_continue"] = False
+
+    # Store selected image URL for image editing context
+    if selected_image_url:
+        state["selected_image_url"] = selected_image_url
     
     # Run graph
     config = {"configurable": {"thread_id": project_id}}

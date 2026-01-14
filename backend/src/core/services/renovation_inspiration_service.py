@@ -16,7 +16,10 @@ import threading
 from typing import Optional, Dict, Any
 from uuid import UUID
 
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 from src.core.services.location_service import extract_location_from_zip, validate_us_zip_code
 from src.db.database import SessionLocal
 from src.db.models import Project
@@ -140,7 +143,7 @@ def format_structured_data_as_inspirations(
     climate = structured_data.get("climate", {})
     renovation_context = structured_data.get("renovation_context", {})
 
-    print(f"[renovation_inspiration] Formatting structured data for {project_type} in {location.get('city')}, {location.get('state_abbr')}")
+    logger.info(f"[renovation_inspiration] Formatting structured data for {project_type} in {location.get('city')}, {location.get('state_abbr')}")
 
     # Return the contractor knowledge directly - it's already in perfect format
     inspirations = {
@@ -153,7 +156,7 @@ def format_structured_data_as_inspirations(
         "_sources": structured_data.get("_sources", []),  # Pass through Tavily sources for citation
     }
 
-    print(f"[renovation_inspiration] Formatted inspirations with {len(contractor_knowledge.get('popular_styles', []))} styles, {len(contractor_knowledge.get('popular_materials', []))} materials, {len(inspirations['_sources'])} sources")
+    logger.info(f"[renovation_inspiration] Formatted inspirations with {len(contractor_knowledge.get('popular_styles', []))} styles, {len(contractor_knowledge.get('popular_materials', []))} materials, {len(inspirations['_sources'])} sources")
     return inspirations
 
 
@@ -180,7 +183,7 @@ async def retrieve_renovation_inspirations(
     """
     # Validate zip code
     if not validate_us_zip_code(zip_code):
-        print(f"[renovation_inspiration] Invalid zip code: {zip_code}")
+        logger.info(f"[renovation_inspiration] Invalid zip code: {zip_code}")
         return None
 
     # Extract location if not provided
@@ -188,7 +191,7 @@ async def retrieve_renovation_inspirations(
         location_data = await extract_location_from_zip(zip_code)
 
     if not location_data or not location_data.get('city'):
-        print(f"[renovation_inspiration] Could not extract location for zip: {zip_code}")
+        logger.info(f"[renovation_inspiration] Could not extract location for zip: {zip_code}")
         return None
 
     city = location_data.get('city', 'Unknown')
@@ -196,12 +199,12 @@ async def retrieve_renovation_inspirations(
     state_code = location_data.get('state_code', 'XX')
     location_display = f"{city}, {state_code}"
 
-    print(f"[renovation_inspiration] Retrieving inspirations for {project_type} in {location_display}")
+    logger.info(f"[renovation_inspiration] Retrieving inspirations for {project_type} in {location_display}")
 
     # Try evidence-based approach first (if service available and Tavily API key present)
     tavily_api_key = os.getenv("TAVILY_API_KEY")
     if HAS_STRUCTURED_DATA_SERVICE and tavily_api_key:
-        print(f"[renovation_inspiration] Using evidence-based approach (Census + NWS + Tavily)")
+        logger.info(f"[renovation_inspiration] Using evidence-based approach (Census + NWS + Tavily)")
         try:
             # Get structured data
             structured_data = await get_zip_structured_data(
@@ -216,14 +219,14 @@ async def retrieve_renovation_inspirations(
                     project_type=project_type
                 )
 
-                print(f"[renovation_inspiration] Successfully retrieved evidence-based inspirations")
+                logger.info(f"[renovation_inspiration] Successfully retrieved evidence-based inspirations")
                 return inspirations
 
         except Exception as e:
-            print(f"[renovation_inspiration] Evidence-based approach failed: {e}, falling back to LLM-only")
+            logger.info(f"[renovation_inspiration] Evidence-based approach failed: {e}, falling back to LLM-only")
 
     # Fall back to LLM-only approach
-    print(f"[renovation_inspiration] Using LLM-only approach")
+    logger.info(f"[renovation_inspiration] Using LLM-only approach")
 
     # Use LLM to generate renovation inspirations
     provider = LLMProvider.for_llm()
@@ -261,11 +264,11 @@ async def retrieve_renovation_inspirations(
 
         inspirations = json.loads(response.strip())
 
-        print(f"[renovation_inspiration] Successfully retrieved LLM-only inspirations for {project_type} in {location_display}")
+        logger.info(f"[renovation_inspiration] Successfully retrieved LLM-only inspirations for {project_type} in {location_display}")
         return inspirations
 
     except Exception as e:
-        print(f"[renovation_inspiration] Failed to retrieve inspirations: {e}")
+        logger.info(f"[renovation_inspiration] Failed to retrieve inspirations: {e}")
         return None
 
 
@@ -288,14 +291,14 @@ async def store_renovation_inspirations(
         try:
             project = db.query(Project).filter(Project.id == project_id).first()
             if not project:
-                print(f"[renovation_inspiration] Project not found: {project_id}")
+                logger.info(f"[renovation_inspiration] Project not found: {project_id}")
                 return False
 
             # Store inspirations
             project.renovation_inspirations = inspirations
             db.commit()
 
-            print(f"[renovation_inspiration] Stored inspirations for project {project_id}")
+            logger.info(f"[renovation_inspiration] Stored inspirations for project {project_id}")
             
             return True
 
@@ -303,7 +306,7 @@ async def store_renovation_inspirations(
             db.close()
 
     except Exception as e:
-        print(f"[renovation_inspiration] Failed to store inspirations: {e}")
+        logger.info(f"[renovation_inspiration] Failed to store inspirations: {e}")
         return False
 
 
@@ -324,7 +327,7 @@ async def retrieve_and_store_inspirations_background(
     """
     start_time = time.time()
     try:
-        print(f"[renovation_inspiration] 🚀 Background task started for project {project_id} | zip={zip_code}")
+        logger.info(f"[renovation_inspiration] 🚀 Background task started for project {project_id} | zip={zip_code}")
 
         # Check cache first
         with _inspiration_cache_lock:
@@ -333,17 +336,17 @@ async def retrieve_and_store_inspirations_background(
                 cached_inspirations['project_type'] = project_type
                 success = await store_renovation_inspirations(project_id, cached_inspirations)
                 elapsed = time.time() - start_time
-                print(f"[renovation_inspiration] ✅ Used cached data for zip {zip_code} | took {elapsed:.2f}s")
+                logger.info(f"[renovation_inspiration] ✅ Used cached data for zip {zip_code} | took {elapsed:.2f}s")
                 return
 
         # Extract location
         location_start = time.time()
         location_data = await extract_location_from_zip(zip_code)
         location_time = time.time() - location_start
-        print(f"[renovation_inspiration] ⏱️  Location extraction: {location_time:.2f}s")
+        logger.info(f"[renovation_inspiration] ⏱️  Location extraction: {location_time:.2f}s")
 
         if not location_data:
-            print(f"[renovation_inspiration] ❌ Failed to extract location for zip {zip_code}")
+            logger.info(f"[renovation_inspiration] ❌ Failed to extract location for zip {zip_code}")
             return
 
         # Retrieve inspirations
@@ -354,10 +357,10 @@ async def retrieve_and_store_inspirations_background(
             location_data=location_data
         )
         inspire_time = time.time() - inspire_start
-        print(f"[renovation_inspiration] ⏱️  Data retrieval: {inspire_time:.2f}s")
+        logger.info(f"[renovation_inspiration] ⏱️  Data retrieval: {inspire_time:.2f}s")
 
         if not inspirations:
-            print(f"[renovation_inspiration] ❌ Failed to retrieve inspirations")
+            logger.info(f"[renovation_inspiration] ❌ Failed to retrieve inspirations")
             return
 
         # Add metadata
@@ -377,7 +380,7 @@ async def retrieve_and_store_inspirations_background(
             cache_data = inspirations.copy()
             cache_data.pop('project_type', None)
             _inspiration_cache[zip_code] = cache_data
-            print(f"[renovation_inspiration] 💾 Cached data for zip {zip_code}")
+            logger.info(f"[renovation_inspiration] 💾 Cached data for zip {zip_code}")
 
         # Store in database
         store_start = time.time()
@@ -385,16 +388,16 @@ async def retrieve_and_store_inspirations_background(
         store_time = time.time() - store_start
 
         elapsed = time.time() - start_time
-        print(f"[renovation_inspiration] ⏱️  Database storage: {store_time:.2f}s")
+        logger.info(f"[renovation_inspiration] ⏱️  Database storage: {store_time:.2f}s")
 
         if success:
-            print(f"[renovation_inspiration] ✅ Background task completed for project {project_id} | total time: {elapsed:.2f}s")
+            logger.info(f"[renovation_inspiration] ✅ Background task completed for project {project_id} | total time: {elapsed:.2f}s")
         else:
-            print(f"[renovation_inspiration] ❌ Failed to store inspirations for project {project_id}")
+            logger.info(f"[renovation_inspiration] ❌ Failed to store inspirations for project {project_id}")
 
     except Exception as e:
         elapsed = time.time() - start_time
-        print(f"[renovation_inspiration] ❌ Background task failed after {elapsed:.2f}s: {e}")
+        logger.info(f"[renovation_inspiration] ❌ Background task failed after {elapsed:.2f}s: {e}")
         import traceback
         traceback.print_exc()
 
@@ -440,7 +443,7 @@ def start_inspiration_retrieval_background(
         name=f"inspiration-{zip_code}"
     )
     thread.start()
-    print(f"[renovation_inspiration] 🚀 Started background thread for project {project_id} | zip={zip_code}")
+    logger.info(f"[renovation_inspiration] 🚀 Started background thread for project {project_id} | zip={zip_code}")
 
 
 async def wait_for_inspirations(project_id: UUID, timeout: float = 25.0) -> Optional[Dict[str, Any]]:
@@ -470,14 +473,14 @@ async def wait_for_inspirations(project_id: UUID, timeout: float = 25.0) -> Opti
         try:
             project = db.query(Project).filter(Project.id == project_id).first()
             if project and project.renovation_inspirations:
-                print(f"[renovation_inspiration] ⚡ Inspirations already available (instant)")
+                logger.info(f"[renovation_inspiration] ⚡ Inspirations already available (instant)")
                 return project.renovation_inspirations
         finally:
             db.close()
     except Exception as e:
-        print(f"[renovation_inspiration] ⚠️  Initial check error: {e}")
+        logger.info(f"[renovation_inspiration] ⚠️  Initial check error: {e}")
 
-    print(f"[renovation_inspiration] ⏳ Waiting for inspirations for project {project_id} (max {timeout}s)...")
+    logger.info(f"[renovation_inspiration] ⏳ Waiting for inspirations for project {project_id} (max {timeout}s)...")
 
     # Progressive backoff: start fast, slow down
     check_intervals = [0.3, 0.3, 0.5, 0.5, 1.0, 1.0, 2.0, 2.0, 3.0]  # Total: ~10.6s
@@ -496,15 +499,15 @@ async def wait_for_inspirations(project_id: UUID, timeout: float = 25.0) -> Opti
                 project = db.query(Project).filter(Project.id == project_id).first()
                 if project and project.renovation_inspirations:
                     elapsed = time.time() - start_time
-                    print(f"[renovation_inspiration] ✅ Inspirations ready after {elapsed:.2f}s")
+                    logger.info(f"[renovation_inspiration] ✅ Inspirations ready after {elapsed:.2f}s")
                     return project.renovation_inspirations
             finally:
                 db.close()
         except Exception as e:
-            print(f"[renovation_inspiration] ⚠️  Error checking inspirations: {e}")
+            logger.info(f"[renovation_inspiration] ⚠️  Error checking inspirations: {e}")
 
     elapsed = time.time() - start_time
-    print(f"[renovation_inspiration] ⏰ Timeout waiting for inspirations after {elapsed:.2f}s")
+    logger.info(f"[renovation_inspiration] ⏰ Timeout waiting for inspirations after {elapsed:.2f}s")
     return None
 
 
@@ -532,11 +535,11 @@ async def prefetch_location_data(
     start_time = time.time()
 
     if not validate_us_zip_code(zip_code):
-        print(f"[renovation_inspiration] Invalid zip code: {zip_code}")
+        logger.info(f"[renovation_inspiration] Invalid zip code: {zip_code}")
         return None
 
     if not HAS_STRUCTURED_DATA_SERVICE:
-        print(f"[renovation_inspiration] Structured data service not available")
+        logger.info(f"[renovation_inspiration] Structured data service not available")
         return None
 
     try:
@@ -544,7 +547,7 @@ async def prefetch_location_data(
         location_data = await get_location_data_only(zip_code=zip_code)
 
         if not location_data:
-            print(f"[renovation_inspiration] Failed to get location data for {zip_code}")
+            logger.info(f"[renovation_inspiration] Failed to get location data for {zip_code}")
             return None
 
         # Store partial data in database with _tavily_pending flag
@@ -560,14 +563,14 @@ async def prefetch_location_data(
                 }
                 db.commit()
                 elapsed = time.time() - start_time
-                print(f"[renovation_inspiration] ✅ Location prefetch completed in {elapsed:.2f}s (Tavily pending)")
+                logger.info(f"[renovation_inspiration] ✅ Location prefetch completed in {elapsed:.2f}s (Tavily pending)")
                 return location_data
         finally:
             db.close()
 
     except Exception as e:
         elapsed = time.time() - start_time
-        print(f"[renovation_inspiration] ❌ Location prefetch failed after {elapsed:.2f}s: {e}")
+        logger.info(f"[renovation_inspiration] ❌ Location prefetch failed after {elapsed:.2f}s: {e}")
         import traceback
         traceback.print_exc()
 
@@ -599,16 +602,16 @@ async def run_smart_search(
     start_time = time.time()
 
     if not validate_us_zip_code(zip_code):
-        print(f"[renovation_inspiration] Invalid zip code: {zip_code}")
+        logger.info(f"[renovation_inspiration] Invalid zip code: {zip_code}")
         return None
 
     if not HAS_STRUCTURED_DATA_SERVICE:
-        print(f"[renovation_inspiration] Structured data service not available")
+        logger.info(f"[renovation_inspiration] Structured data service not available")
         return None
 
     tavily_api_key = os.getenv("TAVILY_API_KEY")
     if not tavily_api_key:
-        print(f"[renovation_inspiration] No Tavily API key available")
+        logger.info(f"[renovation_inspiration] No Tavily API key available")
         return None
 
     try:
@@ -633,7 +636,7 @@ async def run_smart_search(
         )
 
         if not structured_data:
-            print(f"[renovation_inspiration] Smart search returned no data")
+            logger.info(f"[renovation_inspiration] Smart search returned no data")
             return None
 
         # Format and store results
@@ -663,7 +666,7 @@ async def run_smart_search(
                 project.renovation_inspirations = inspirations
                 db.commit()
                 elapsed = time.time() - start_time
-                print(f"[renovation_inspiration] ✅ Smart search completed in {elapsed:.2f}s")
+                logger.info(f"[renovation_inspiration] ✅ Smart search completed in {elapsed:.2f}s")
 
                 # Emit context_ready event via SSE
                 from src.core.services.event_broadcaster import emit_context_ready
@@ -675,7 +678,7 @@ async def run_smart_search(
 
     except Exception as e:
         elapsed = time.time() - start_time
-        print(f"[renovation_inspiration] ❌ Smart search failed after {elapsed:.2f}s: {e}")
+        logger.info(f"[renovation_inspiration] ❌ Smart search failed after {elapsed:.2f}s: {e}")
         import traceback
         traceback.print_exc()
 
@@ -736,7 +739,7 @@ def start_location_prefetch_background(
         name=f"location-prefetch-{zip_code}"
     )
     thread.start()
-    print(f"[renovation_inspiration] 🚀 Started location prefetch for project {project_id} | zip={zip_code}")
+    logger.info(f"[renovation_inspiration] 🚀 Started location prefetch for project {project_id} | zip={zip_code}")
 
 
 def start_smart_search_background(
@@ -765,4 +768,4 @@ def start_smart_search_background(
         name=f"smart-search-{zip_code}"
     )
     thread.start()
-    print(f"[renovation_inspiration] 🎯 Started smart search for project {project_id} | zip={zip_code} | insights={search_insights.detected_era}")
+    logger.info(f"[renovation_inspiration] 🎯 Started smart search for project {project_id} | zip={zip_code} | insights={search_insights.detected_era}")

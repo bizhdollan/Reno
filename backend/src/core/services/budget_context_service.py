@@ -12,7 +12,10 @@ from typing import Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
 
+from src.core.logger import get_logger
 from src.db.models import BudgetContext
+
+logger = get_logger(__name__)
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.utils import parse_json
 from .session_cache import SessionCache
@@ -109,7 +112,7 @@ class BudgetContextService:
         Returns:
             BudgetContext with sentiment and suggested materials
         """
-        print(f"[BudgetContextService] Detecting budget from: {user_message[:50]}...")
+        logger.info(f"[BudgetContextService] Detecting budget from: {user_message[:50]}...")
 
         # Format prompt
         prompt = BUDGET_SENTIMENT_PROMPT.format(user_message=user_message)
@@ -133,7 +136,7 @@ class BudgetContextService:
             sentiment = data.get("sentiment", "medium")
             confidence = data.get("confidence", 0.5)
         except Exception as e:
-            print(f"[BudgetContextService] Failed to parse response: {e}")
+            logger.info(f"[BudgetContextService] Failed to parse response: {e}")
             sentiment = "medium"
             confidence = 0.5
 
@@ -162,7 +165,7 @@ class BudgetContextService:
         # Cache the context
         self.cache.set_budget_context(project_id, context)
 
-        print(f"[BudgetContextService] Detected sentiment: {sentiment} (confidence: {confidence})")
+        logger.info(f"[BudgetContextService] Detected sentiment: {sentiment} (confidence: {confidence})")
         return context
 
     async def suggest_materials(
@@ -202,7 +205,7 @@ class BudgetContextService:
             )
             return parse_json(response)
         except Exception as e:
-            print(f"[BudgetContextService] Failed to suggest materials: {e}")
+            logger.info(f"[BudgetContextService] Failed to suggest materials: {e}")
             # Return defaults based on budget level
             return self._get_default_materials(budget_level)
 
@@ -251,7 +254,7 @@ class BudgetContextService:
         Returns:
             Dictionary with low/mid/high tier breakdowns including prices
         """
-        print(f"[BudgetContextService] Getting regional costs for {zip_code}, {room_type}")
+        logger.info(f"[BudgetContextService] Getting regional costs for {zip_code}, {room_type}")
 
         prompt = f"""For zip code {zip_code}, provide cost estimates for {room_type} renovation.
 
@@ -303,7 +306,7 @@ Return valid JSON only."""
             )
             return parse_json(response)
         except Exception as e:
-            print(f"[BudgetContextService] Failed to get regional costs: {e}")
+            logger.info(f"[BudgetContextService] Failed to get regional costs: {e}")
             # Return generic defaults
             return {
                 "low_tier": {"total_estimate": "$3000-5000"},

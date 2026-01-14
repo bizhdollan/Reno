@@ -5,7 +5,10 @@ Shows before/after comparison of the renovation project.
 User can confirm to proceed to cost estimation or request changes.
 """
 
+from src.core.logger import get_logger
 from src.core.langgraph.state import ProjectState
+
+logger = get_logger(__name__)
 from src.core.langgraph.utils import get_latest_user_message
 
 
@@ -52,7 +55,7 @@ Be concise and focus on the most impactful visual changes."""
         )
         return response.strip()
     except Exception as e:
-        print(f"[final_review] Failed to generate comparison: {e}")
+        logger.info(f"[final_review] Failed to generate comparison: {e}")
         return ""
 
 
@@ -299,7 +302,7 @@ async def final_review_node(state: ProjectState) -> dict:
     # Check if we just entered from confirming_proposal - show summary first
     # This flag is set by confirming_proposal when user approves the design
     if state.get("_show_final_review_summary"):
-        print("[final_review] Entering from confirming_proposal - showing summary first")
+        logger.info("[final_review] Entering from confirming_proposal - showing summary first")
         updates["_show_final_review_summary"] = None  # Clear the flag
         # Fall through to show summary (skip user message processing)
         user_message = None
@@ -310,7 +313,7 @@ async def final_review_node(state: ProjectState) -> dict:
         intent_result = await detect_user_intent(user_message)
         intent = intent_result.get("intent", "unclear")
 
-        print(f"[final_review] User intent: {intent} | confidence: {intent_result.get('confidence')} | reasoning: {intent_result.get('reasoning')}")
+        logger.info(f"[final_review] User intent: {intent} | confidence: {intent_result.get('confidence')} | reasoning: {intent_result.get('reasoning')}")
 
         if intent == "confirm":
             updates["current_stage"] = "cost_estimation"
@@ -322,7 +325,7 @@ async def final_review_node(state: ProjectState) -> dict:
         elif intent == "visual_change":
             # User wants to change the generated image/design - go back to Stage 2
             change_request = intent_result.get("specific_change") or user_message
-            print(f"[final_review] Visual change detected: going back to Stage 2 with feedback")
+            logger.info(f"[final_review] Visual change detected: going back to Stage 2 with feedback")
 
             existing_feedback = list(state.get("image_generation_feedback", []))
             existing_feedback.append(change_request)

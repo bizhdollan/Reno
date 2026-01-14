@@ -13,7 +13,10 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
+from src.core.logger import get_logger
 from src.db.models import CorrectionHistory, ImageAnalysis, Project
+
+logger = get_logger(__name__)
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.utils import parse_json
 from .session_cache import SessionCache
@@ -64,7 +67,7 @@ class CorrectionService:
         Returns:
             CorrectionHistory record
         """
-        print(f"[CorrectionService] Applying {correction_type} correction: {field_changed}")
+        logger.info(f"[CorrectionService] Applying {correction_type} correction: {field_changed}")
 
         # Get current value
         old_value = await self._get_current_value(project_id, correction_type, field_changed)
@@ -92,7 +95,7 @@ class CorrectionService:
         # Cleanup old corrections
         await self._cleanup_old_corrections(project_id)
 
-        print(f"[CorrectionService] Correction applied and stored: {correction.id}")
+        logger.info(f"[CorrectionService] Correction applied and stored: {correction.id}")
         return correction
 
     async def apply_correction_from_message(
@@ -114,7 +117,7 @@ class CorrectionService:
         Returns:
             (updated_data, correction_record)
         """
-        print(f"[CorrectionService] Interpreting correction: {user_message[:50]}...")
+        logger.info(f"[CorrectionService] Interpreting correction: {user_message[:50]}...")
 
         prompt = f"""You are helping update renovation data based on user feedback.
 
@@ -183,7 +186,7 @@ Return the COMPLETE updated data. Return valid JSON only, no markdown."""
             return updated_data, correction
 
         except Exception as e:
-            print(f"[CorrectionService] Failed to interpret correction: {e}")
+            logger.info(f"[CorrectionService] Failed to interpret correction: {e}")
             raise ValueError(f"Failed to apply correction: {e}")
 
     async def undo_last_correction(
@@ -207,7 +210,7 @@ Return the COMPLETE updated data. Return valid JSON only, no markdown."""
         if not last:
             return False, "Nothing to undo."
 
-        print(f"[CorrectionService] Undoing correction: {last.field_changed}")
+        logger.info(f"[CorrectionService] Undoing correction: {last.field_changed}")
 
         try:
             # Rollback the change
@@ -231,7 +234,7 @@ Return the COMPLETE updated data. Return valid JSON only, no markdown."""
             return True, f"Undone: {last.field_changed} reverted to previous value."
 
         except Exception as e:
-            print(f"[CorrectionService] Failed to undo: {e}")
+            logger.info(f"[CorrectionService] Failed to undo: {e}")
             return False, f"Failed to undo: {str(e)}"
 
     async def get_correction_history(
@@ -318,7 +321,7 @@ Return the COMPLETE updated data. Return valid JSON only, no markdown."""
             for c in to_delete:
                 self.db.delete(c)
             self.db.commit()
-            print(f"[CorrectionService] Cleaned up {len(to_delete)} old corrections")
+            logger.info(f"[CorrectionService] Cleaned up {len(to_delete)} old corrections")
 
     def _get_nested_value(self, obj: dict, path: str) -> Any:
         """Get value from nested dict using dot notation."""

@@ -5,7 +5,10 @@ from uuid import uuid4
 import litellm
 from litellm import acompletion
 
+from src.core.logger import get_logger
 from src.config import get_llm_config, get_vlm_config, get_vgm_config, LLMConfig, VLMConfig, VGMConfig
+
+logger = get_logger(__name__)
 
 
 # supported image formats across all providers (openai, anthropic, gemini)
@@ -137,6 +140,33 @@ class LLMProvider:
 
         return total_cost
 
+    def _safe_uuid(self, value: Optional[str]) -> Optional["UUID"]:
+        """
+        Safely convert a string to UUID.
+
+        Returns None if:
+        - value is None or empty
+        - value is not a valid UUID format (e.g., project tokens like PRJ-XXXXX)
+
+        Args:
+            value: String that might be a UUID
+
+        Returns:
+            UUID object if valid, None otherwise
+        """
+        if not value:
+            return None
+
+        from uuid import UUID
+
+        # Check if it looks like a UUID (has dashes in right places or is 32 hex chars)
+        # UUID format: 8-4-4-4-12 (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+        try:
+            return UUID(value)
+        except (ValueError, AttributeError):
+            # Not a valid UUID format (e.g., project token like PRJ-10NKXQ)
+            return None
+
     async def _log_cost(
         self,
         api_call_id: str,
@@ -150,17 +180,23 @@ class LLMProvider:
         Log LLM cost to database.
 
         This is a best-effort logging - failures don't break the main flow.
+
+        Note: project_id can be either a UUID string or a project token (PRJ-XXXXX).
+        Only valid UUIDs will be stored; tokens will result in project_id=None.
         """
         try:
             from src.db.database import SessionLocal
             from src.db.models import LLMCost
-            from uuid import UUID
+
+            # Safely convert to UUIDs - handles tokens like PRJ-XXXXX gracefully
+            api_call_uuid = self._safe_uuid(api_call_id)
+            project_uuid = self._safe_uuid(project_id)
 
             db = SessionLocal()
             try:
                 cost_record = LLMCost(
-                    api_call_id=UUID(api_call_id) if api_call_id else None,
-                    project_id=UUID(project_id) if project_id else None,
+                    api_call_id=api_call_uuid,
+                    project_id=project_uuid,
                     model=self.model,
                     operation_type=operation_type,
                     input_tokens=input_tokens,
@@ -174,7 +210,7 @@ class LLMProvider:
                 db.close()
         except Exception as e:
             # Log but don't fail
-            print(f"[LLM Cost Tracking] Failed to log cost: {e}")
+            logger.warning(f"[LLM Cost Tracking] Failed to log cost: {e}")
     
     def _validate_messages(self, messages: list[dict]) -> None:
         for message in messages:
@@ -249,7 +285,7 @@ class LLMProvider:
         if is_reasoning_model(self.model):
             # Reasoning models only support temperature=1 (or no temperature param)
             # Don't pass temperature at all - let the API use its default
-            print(f"[LLM] Reasoning model detected ({self.model}) - dropping temperature param")
+            logger.debug(f"[LLM] Reasoning model detected ({self.model}) - dropping temperature param")
         else:
             completion_kwargs["temperature"] = temperature
 
@@ -265,7 +301,7 @@ class LLMProvider:
                 output_tokens = response.usage.completion_tokens
                 cost_usd = self._calculate_cost(input_tokens, output_tokens)
 
-                print(f"[LLM Usage] {self.model} | {operation_type or 'unknown'} | "
+                logger.info(f"[LLM Usage] {self.model} | {operation_type or 'unknown'} | "
                       f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
 
                 # Log to database (async, non-blocking)
@@ -302,7 +338,7 @@ class LLMProvider:
         }
 
         if is_reasoning_model(self.model):
-            print(f"[LLM Stream] Reasoning model detected ({self.model}) - dropping temperature param")
+            logger.debug(f"[LLM Stream] Reasoning model detected ({self.model}) - dropping temperature param")
         else:
             completion_kwargs["temperature"] = temperature
 
@@ -347,7 +383,7 @@ class LLMProvider:
         }
 
         if is_reasoning_model(self.model):
-            print(f"[LLM Tools] Reasoning model detected ({self.model}) - dropping temperature param")
+            logger.debug(f"[LLM Tools] Reasoning model detected ({self.model}) - dropping temperature param")
         else:
             completion_kwargs["temperature"] = temperature
 
@@ -360,7 +396,7 @@ class LLMProvider:
                 output_tokens = response.usage.completion_tokens
                 cost_usd = self._calculate_cost(input_tokens, output_tokens)
 
-                print(f"[LLM Usage] {self.model} | {operation_type or 'tools'} | "
+                logger.info(f"[LLM Usage] {self.model} | {operation_type or 'tools'} | "
                       f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
 
                 await self._log_cost(
@@ -466,7 +502,7 @@ class LLMProvider:
                         description = part.text
                         break
 
-            print(f"[VGM] Extracted description: {description[:100]}..." if len(description) > 100 else f"[VGM] Extracted description: {description}")
+            logger.debug(f"[VGM] Extracted description: {description[:100]}..." if len(description) > 100 else f"[VGM] Extracted description: {description}")
 
             # =====================================================================
             # EXTRACT IMAGE - Check multiple locations
@@ -486,14 +522,14 @@ class LLMProvider:
                                 import base64
                                 image_data = base64.b64decode(part['inline_data']['data'])
                                 mime_type = part['inline_data'].get('mime_type', 'image/png')
-                                print(f"[VGM] Found image in native Gemini structure (inline_data)")
+                                logger.debug(f"[VGM] Found image in native Gemini structure (inline_data)")
                                 break
                             # Check for object with inline_data attribute
                             elif hasattr(part, 'inline_data') and part.inline_data:
                                 import base64
                                 image_data = base64.b64decode(part.inline_data.data)
                                 mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
-                                print(f"[VGM] Found image in native Gemini structure (inline_data attr)")
+                                logger.debug(f"[VGM] Found image in native Gemini structure (inline_data attr)")
                                 break
                         if image_data:
                             break
@@ -510,7 +546,7 @@ class LLMProvider:
 
                     import base64
                     image_data = base64.b64decode(base64_string)
-                    print(f"[VGM] Found image in LiteLLM structure")
+                    logger.debug(f"[VGM] Found image in LiteLLM structure")
                 else:
                     raise LLMProviderError(f"Unexpected image URL format: {image_data_url[:50]}")
 
@@ -529,7 +565,7 @@ class LLMProvider:
                 output_tokens = response.usage.completion_tokens
                 cost_usd = self._calculate_cost(input_tokens, output_tokens)
 
-                print(f"[VGM Usage] {self.model} | {operation_type or 'image_generation'} | "
+                logger.info(f"[VGM Usage] {self.model} | {operation_type or 'image_generation'} | "
                       f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
 
                 await self._log_cost(

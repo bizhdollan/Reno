@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Send, X, Paperclip, Check, ChevronDown, ChevronUp, Camera, SwitchCamera,
+  Send, X, Check, ChevronDown, ChevronUp, Camera, SwitchCamera,
   Bot, User, Sparkles, CheckCircle2, Circle, Play, RotateCcw, Film, Mail, Copy, CheckCircle, Phone
 } from "lucide-react";
 import rehypeRaw from "rehype-raw";
@@ -13,6 +13,14 @@ import { storage } from "../../lib/storage";
 import { TokenPopup } from "../../components/TokenPopup";
 import SuggestionCards, { SuggestionOption, Source } from "../../components/SuggestionCards";
 import { ContextProgress } from "../../components/ContextProgress";
+import { ProjectBasicsForm } from "../../components/ProjectBasicsForm";
+import { Canvas } from "../../components/Canvas";
+import { MobileCanvasExpander } from "../../components/MobileCanvasExpander";
+import { useEntityDetection } from "../../hooks/useEntityDetection";
+import { QuickActionButtons } from "../../components/QuickActionButtons";
+import { StepIndicator } from "../../components/StepIndicator";
+import { ImageUploadPrompt } from "../../components/ImageUploadPrompt";
+import { CostEstimationView } from "../../components/CostEstimationView";
 
 // ==================== TYPES ====================
 interface Message {
@@ -90,13 +98,16 @@ interface FileUploadResponse {
 }
 
 // ==================== CONSTANTS ====================
+// Simplified flow: Project Basics (form) → Design (chat+canvas) → Estimate
+// Note: "completed" is a backend stage but not shown in progress UI
 const STAGES = [
   { key: "project_basics", label: "Project Info", icon: "📋", description: "Tell us about your project" },
-  { key: "image_analysis_generation", label: "Analysis", icon: "🔍", description: "AI analyzes your space" },
-  { key: "final_review", label: "Review", icon: "✅", description: "Confirm your details" },
+  { key: "image_analysis_generation", label: "Design", icon: "🎨", description: "Upload & design your space" },
   { key: "cost_estimation", label: "Estimate", icon: "💰", description: "Get your pricing" },
-  { key: "completed", label: "Done", icon: "🎉", description: "Estimate complete!" },
 ];
+
+// Map completed stage to cost_estimation for progress display
+const getDisplayStage = (stage: string) => stage === "completed" ? "cost_estimation" : stage;
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
 const MAX_VIDEO_SIZE = 25 * 1024 * 1024; // 25MB
@@ -266,7 +277,9 @@ async function initializeChat(): Promise<InitResult> {
 
 // ==================== PROGRESS BAR ====================
 const ProgressBar = memo(function ProgressBar({ currentStage }: { currentStage: string }) {
-  const currentIndex = STAGES.findIndex((s) => s.key === currentStage);
+  // Map completed to cost_estimation for display purposes
+  const displayStage = getDisplayStage(currentStage);
+  const currentIndex = STAGES.findIndex((s) => s.key === displayStage);
 
   return (
     <div className="w-full">
@@ -1428,9 +1441,26 @@ export default function EstimatePage() {
   const [contextReady, setContextReady] = useState(true);
   const [isSendingImages, setIsSendingImages] = useState(false);
 
+  // Form-based project basics
+  const [isSubmittingForm, setIsSubmittingForm] = useState(false);
+
+  // Canvas state
+  const [selectedCanvasImageId, setSelectedCanvasImageId] = useState<string | null>(null);
+
+  // Track if we're in initial image upload phase (before any images have been sent)
+  const [hasUploadedInitialImages, setHasUploadedInitialImages] = useState(false);
+
+  // Track used quick action IDs - buttons disappear after clicking
+  const [usedActionIds, setUsedActionIds] = useState<Set<string>>(new Set());
+
+  // Entity detection for targeted editing
+  const { entities, isLoading: isDetectingEntities, detectEntities, clearEntities } = useEntityDetection();
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Ref to hold canvas images for use in callbacks without circular dependencies
+  const canvasImagesRef = useRef<{ id: string; url: string; type: "uploaded" | "generated"; label?: string; changes?: string[] }[]>([]);
 
   useEffect(() => { setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100); }, [messages.length, isSending]);
   useEffect(() => { const t = textareaRef.current; if (t) { t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight, 150)}px`; } }, [input]);
@@ -1678,8 +1708,21 @@ export default function EstimatePage() {
       setContextReady(false);
     }
 
+    // Get the selected canvas image URL to pass to backend for context
+    // Use ref to avoid circular dependency with canvasImages useMemo
+    const selectedCanvasImage = canvasImagesRef.current.find((img) => img.id === selectedCanvasImageId);
+    const selectedImageUrl = selectedCanvasImage?.url || null;
+
     try {
-      const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: projectId, message: messageContent }) });
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: projectId,
+          message: messageContent,
+          selected_image_url: selectedImageUrl,
+        })
+      });
 
       // Handle non-OK responses with structured error parsing
       if (!res.ok) {
@@ -1735,7 +1778,7 @@ export default function EstimatePage() {
       setIsSending(false);
       setIsSendingImages(false);
     }
-  }, [isSending, input, pendingFiles, projectId]);
+  }, [isSending, input, pendingFiles, projectId, selectedCanvasImageId]);
 
   const handleSelectTier = useCallback((tierId: string) => { sendMessage(`I select the ${tierId} tier`); }, [sendMessage]);
   const handleSelectSuggestion = useCallback((optionIndex: number) => { sendMessage(`Generate option ${optionIndex + 1}`); }, [sendMessage]);
@@ -1746,9 +1789,285 @@ export default function EstimatePage() {
     }
   }, [sendMessage]);
 
+  // Auto-send images when uploaded via ImageUploadPrompt (before initial images are sent)
+  useEffect(() => {
+    // Only auto-send if:
+    // 1. We haven't uploaded initial images yet
+    // 2. There are pending files
+    // 3. All files are uploaded (none are still uploading)
+    // 4. We're not already sending
+    const allUploaded = pendingFiles.length > 0 && pendingFiles.every(f => f.uploaded && !f.uploading);
+    const shouldAutoSend = !hasUploadedInitialImages && allUploaded && !isSending;
+
+    if (shouldAutoSend) {
+      setHasUploadedInitialImages(true);
+      sendMessage();
+    }
+  }, [pendingFiles, hasUploadedInitialImages, isSending, sendMessage]);
+
+  // Handle project basics form submission
+  const handleProjectBasicsSubmit = useCallback(async (data: { projectTitle: string; projectType: string; zipCode: string }) => {
+    setIsSubmittingForm(true);
+    setError(null);
+
+    try {
+      // Send form data as a structured message that backend can parse
+      const formMessage = `My project is titled "${data.projectTitle}". It's a ${data.projectType} renovation. My ZIP code is ${data.zipCode}.`;
+
+      // Add user message to display
+      setMessages((prev) => [...prev, {
+        role: "user",
+        content: formMessage,
+        timestamp: new Date().toISOString()
+      }]);
+
+      // Send to backend
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId, message: formMessage })
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ message: "Something went wrong" }));
+        throw new Error(errorData.message || "Failed to submit project details");
+      }
+
+      const responseData: any = await res.json();
+
+      // Update project ID and state
+      if (responseData.project_id) {
+        setProjectId(responseData.project_id);
+      }
+      if (responseData.internal_id && !storage.getProjectToken()) {
+        storage.setDraftProjectId(responseData.internal_id);
+      }
+      setProjectState(responseData.state);
+
+      // Add assistant response
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: responseData.assistant || "Great! Let's move on to the next step.",
+        timestamp: new Date().toISOString()
+      }]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to submit project details");
+    } finally {
+      setIsSubmittingForm(false);
+    }
+  }, [projectId]);
+
   const isCompleted = projectState?.current_stage === "completed";
   const hasUploadingFiles = pendingFiles.some((f) => f.uploading);
   const hasUploadedFiles = pendingFiles.some((f) => f.uploaded);
+
+  // Show form instead of chat when on project_basics stage and details not yet collected
+  const showProjectBasicsForm = projectState?.current_stage === "project_basics" && !projectState?.project_title;
+
+  // Show canvas on desktop when there are images to display or in image_analysis_generation stage
+  const showCanvas = !showProjectBasicsForm && (
+    projectState?.current_stage === "image_analysis_generation" ||
+    (projectState?.current_stage === "project_basics" && !!projectState?.project_title)
+  );
+
+  // Extract images from messages for the canvas
+  const canvasImages = useMemo(() => {
+    const images: { id: string; url: string; type: "uploaded" | "generated"; label?: string; changes?: string[] }[] = [];
+    const seenUrls = new Set<string>(); // Track URLs to avoid duplicates
+    let uploadedCounter = 0;
+    let generatedCounter = 0;
+
+    // Helper to check if URL is a generated image (from /files/generated/ path)
+    const isGeneratedImageUrl = (url: string) => url.includes("/files/generated/");
+
+    // Helper to normalize URL for comparison (remove query params, trailing slashes)
+    const normalizeUrl = (url: string) => url.split("?")[0].replace(/\/$/, "");
+
+    // Helper to extract change descriptions from text content
+    const extractChanges = (text: string): string[] => {
+      const changes: string[] = [];
+
+      // Match bullet points with various formats:
+      // • Change text
+      // - Change text
+      // * Change text
+      // Numbered: 1. Change text
+      const bulletRegex = /(?:^|\n)\s*(?:[•\-\*]|\d+\.)\s*([^\n]+)/g;
+      let match;
+      while ((match = bulletRegex.exec(text)) !== null) {
+        const change = match[1].trim();
+        // Filter out generic phrases and keep only actual changes
+        if (change &&
+            !change.toLowerCase().includes("how's this") &&
+            !change.toLowerCase().includes("say 'continue'") &&
+            !change.toLowerCase().includes("request more changes") &&
+            !change.toLowerCase().startsWith("step ") &&
+            change.length > 5) {
+          changes.push(change);
+        }
+      }
+
+      return changes;
+    };
+
+    messages.forEach((msg, msgIdx) => {
+      const content = msg.content;
+      const isUserMessage = msg.role === "user";
+
+      if (Array.isArray(content)) {
+        content.forEach((item, itemIdx) => {
+          if (item.type === "image_url" && item.image_url?.url) {
+            const url = item.image_url.url;
+            const normalizedUrl = normalizeUrl(url);
+
+            // Skip if already seen
+            if (seenUrls.has(normalizedUrl)) return;
+            seenUrls.add(normalizedUrl);
+
+            if (isUserMessage) {
+              uploadedCounter++;
+              images.push({
+                id: `img-${msgIdx}-${itemIdx}`,
+                url,
+                type: "uploaded",
+                label: `Uploaded ${uploadedCounter}`,
+              });
+            } else if (isGeneratedImageUrl(url)) {
+              generatedCounter++;
+              images.push({
+                id: `img-${msgIdx}-${itemIdx}`,
+                url,
+                type: "generated",
+                label: `Generated ${generatedCounter}`,
+              });
+            }
+          }
+        });
+      } else if (typeof content === "string") {
+        // Extract changes from the text content
+        const changes = extractChanges(content);
+
+        // Extract images from markdown in assistant messages: ![alt](url)
+        const mdImgRegex = /!\[.*?\]\((.*?)\)/g;
+        let match;
+        while ((match = mdImgRegex.exec(content)) !== null) {
+          const url = match[1];
+          const normalizedUrl = normalizeUrl(url);
+
+          // Only add if not seen and is a generated image
+          if (!seenUrls.has(normalizedUrl) && isGeneratedImageUrl(url)) {
+            seenUrls.add(normalizedUrl);
+            generatedCounter++;
+            images.push({
+              id: `img-${msgIdx}-md-${generatedCounter}`,
+              url,
+              type: "generated",
+              label: `Generated ${generatedCounter}`,
+              changes: changes.length > 0 ? changes : undefined,
+            });
+          }
+        }
+
+        // Extract images from HTML <img> tags: <img src="url" ... />
+        const htmlImgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+        while ((match = htmlImgRegex.exec(content)) !== null) {
+          const url = match[1];
+          const normalizedUrl = normalizeUrl(url);
+
+          // Only add if not seen and is a generated image
+          if (!seenUrls.has(normalizedUrl) && isGeneratedImageUrl(url)) {
+            seenUrls.add(normalizedUrl);
+            generatedCounter++;
+            images.push({
+              id: `img-${msgIdx}-html-${generatedCounter}`,
+              url,
+              type: "generated",
+              label: `Generated ${generatedCounter}`,
+              changes: changes.length > 0 ? changes : undefined,
+            });
+          }
+        }
+      }
+    });
+
+    return images;
+  }, [messages]);
+
+  // Sync canvas images ref for use in callbacks (avoids circular dependency)
+  useEffect(() => {
+    canvasImagesRef.current = canvasImages;
+  }, [canvasImages]);
+
+  // Determine if we're in the initial image upload phase (before images are acknowledged by assistant)
+  const isInInitialImagePhase = (
+    (projectState?.current_stage === "project_basics" && !!projectState?.project_title) ||
+    projectState?.current_stage === "image_analysis_generation"
+  ) && !showProjectBasicsForm && canvasImages.length === 0;
+
+  // Show image upload prompt when waiting for images (no files selected yet)
+  const waitingForImages = isInInitialImagePhase
+    && pendingFiles.length === 0
+    && !isSending
+    && !isSendingImages;
+
+  // Hide footer completely during initial image phase until images are acknowledged
+  // This hides the input bar, paperclip, camera buttons
+  const hideFooterDuringInitialPhase = isInInitialImagePhase;
+
+  // Hide footer on desktop when in cost_estimation stage (interaction through tier cards)
+  const showCostEstimationView = projectState?.current_stage === "cost_estimation" && projectState?.cost_tiers && projectState.cost_tiers.length > 0;
+
+  // Track previous canvas images count to detect new images
+  const prevCanvasImagesCountRef = useRef(0);
+
+  // Auto-select latest image for canvas (including when new images arrive)
+  useEffect(() => {
+    if (canvasImages.length > 0) {
+      const newImagesAdded = canvasImages.length > prevCanvasImagesCountRef.current;
+
+      // Select latest generated image if: no selection OR new images were added
+      if (!selectedCanvasImageId || newImagesAdded) {
+        const latestGenerated = [...canvasImages].reverse().find((img) => img.type === "generated");
+        setSelectedCanvasImageId(latestGenerated?.id || canvasImages[canvasImages.length - 1].id);
+      }
+
+      prevCanvasImagesCountRef.current = canvasImages.length;
+    }
+  }, [canvasImages, selectedCanvasImageId]);
+
+  // Detect entities when selected image changes
+  useEffect(() => {
+    if (showCanvas && selectedCanvasImageId && canvasImages.length > 0) {
+      const selectedImage = canvasImages.find((img) => img.id === selectedCanvasImageId);
+      if (selectedImage?.url) {
+        // Detect entities for any selected image (uploaded or generated)
+        detectEntities(selectedImage.url, projectId !== "new" ? projectId : undefined);
+      } else {
+        clearEntities();
+      }
+    }
+  }, [selectedCanvasImageId, showCanvas, canvasImages, projectId, detectEntities, clearEntities]);
+
+  // Handle quick action button click - mark as used and send message
+  const handleQuickAction = useCallback((message: string, actionId: string) => {
+    // Mark this action as used so it disappears
+    setUsedActionIds((prev) => new Set(prev).add(actionId));
+    sendMessage(message);
+  }, [sendMessage]);
+
+  // Show "Continue to Estimate" button when user has generated images
+  const hasGeneratedImages = useMemo(() => {
+    return canvasImages.some((img) => img.type === "generated");
+  }, [canvasImages]);
+
+  const showContinueButton = showCanvas && hasGeneratedImages && !isSending;
+
+  // Handle continue to estimate - send simple message (selected image URL is passed via state)
+  const handleContinueToEstimate = useCallback(() => {
+    // Simple message that backend can classify as "move_forward"
+    // The selected_image_url is already passed separately in the API request
+    sendMessage("continue");
+  }, [sendMessage]);
 
   // Show save modal when completed
   useEffect(() => {
@@ -1811,8 +2130,8 @@ export default function EstimatePage() {
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-navy-50 to-white dark:from-navy-950 dark:to-navy-900">
       {/* Header */}
-      <header className="flex-shrink-0 border-b border-navy-100 dark:border-navy-800 bg-white/80 dark:bg-navy-900/80 backdrop-blur-lg sticky top-16 md:top-20 z-30">
-        <div className="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-3">
+      <header className={`flex-shrink-0 border-b border-navy-100 dark:border-navy-800 bg-white/80 dark:bg-navy-900/80 backdrop-blur-lg sticky top-16 md:top-20 z-30 ${showCanvas ? "lg:w-[45%]" : ""}`}>
+        <div className={`px-3 sm:px-4 py-2 sm:py-3 ${showCanvas ? "" : "max-w-4xl mx-auto"}`}>
           <div className="flex items-center justify-between mb-2 sm:mb-3">
             <div className="min-w-0 flex-1">
               <h1 className="text-base sm:text-xl font-bold text-navy-900 dark:text-white truncate">Renovation Estimator</h1>
@@ -1837,31 +2156,128 @@ export default function EstimatePage() {
               )}
             </div>
           </div>
-          <ProgressBar currentStage={projectState?.current_stage || "project_basics"} />
+          {/* Step Indicator - compact on mobile, with label on desktop */}
+          <div className="flex sm:hidden">
+            <StepIndicator
+              steps={STAGES.map(s => ({ key: s.key, label: s.label }))}
+              currentStep={getDisplayStage(projectState?.current_stage || "project_basics")}
+              compact
+            />
+          </div>
+          <div className="hidden sm:flex">
+            <StepIndicator
+              steps={STAGES.map(s => ({ key: s.key, label: s.label }))}
+              currentStep={getDisplayStage(projectState?.current_stage || "project_basics")}
+            />
+          </div>
         </div>
       </header>
 
-      {/* Messages */}
-      <main className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
-          <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
-            <AnimatePresence>
-              {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
-            </AnimatePresence>
-
-            {/* Typing indicator - shown when sending non-image messages */}
-            {isSending && !isSendingImages && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
-
-            <div ref={messagesEndRef} />
+      {/* Main Content - Form, Chat, or Split-screen */}
+      <main className="flex-1 overflow-hidden relative">
+        {showProjectBasicsForm ? (
+          /* Project Basics Form */
+          <div className="h-full overflow-y-auto flex items-center justify-center py-8 px-4 mt-14 sm:mt-16">
+            <ProjectBasicsForm
+              onSubmit={handleProjectBasicsSubmit}
+              isLoading={isSubmittingForm}
+            />
           </div>
-        </div>
+        ) : showCanvas ? (
+          /* Split-screen: Chat (left) + Fixed Canvas (right) on desktop */
+          <>
+            {/* Chat Panel - Full width on mobile, left side on desktop */}
+            <div className="h-full overflow-y-auto lg:pr-[55%]">
+              <div className="px-3 sm:px-4 py-4 sm:py-6">
+                <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
+                  <AnimatePresence>
+                    {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
+                  </AnimatePresence>
+
+                  {/* Typing indicator */}
+                  {isSending && !isSendingImages && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
+
+                  {/* Image Upload Prompt - shown when waiting for images */}
+                  {waitingForImages && (
+                    <ImageUploadPrompt
+                      projectType={projectState?.project_type || "room"}
+                      onFileSelect={(files) => {
+                        Array.from(files).forEach(file => addFileToUpload(file));
+                      }}
+                      onCameraClick={() => setIsCameraOpen(true)}
+                      isUploading={hasUploadingFiles}
+                    />
+                  )}
+
+                  <div ref={messagesEndRef} />
+                </div>
+              </div>
+            </div>
+
+            {/* Fixed Canvas Panel - Right side on desktop, starts from main header */}
+            <div className="hidden lg:block fixed top-16 md:top-20 right-0 bottom-0 w-[55%] border-l border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-900 z-20">
+              <Canvas
+                images={canvasImages}
+                selectedImageId={selectedCanvasImageId || undefined}
+                onSelectImage={setSelectedCanvasImageId}
+                onImageClick={setLightboxImage}
+                isAnalyzing={isSendingImages && !hasGeneratedImages}
+                isGenerating={isSending && hasGeneratedImages}
+                showContinueButton={showContinueButton}
+                onContinue={handleContinueToEstimate}
+              />
+            </div>
+          </>
+        ) : showCostEstimationView ? (
+          /* Cost Estimation View - Beautiful full-screen on desktop, chat on mobile */
+          <>
+            {/* Desktop: Full CostEstimationView */}
+            <div className="hidden lg:block h-full overflow-y-auto mt-14 sm:mt-16">
+              <CostEstimationView
+                tiers={projectState?.cost_tiers || []}
+                onSelectTier={handleSelectTier}
+                selectedImageUrl={projectState?.selected_final_image_url || projectState?.generated_image_url}
+                projectTitle={projectState?.project_title}
+                projectType={projectState?.project_type}
+              />
+            </div>
+            {/* Mobile: Chat Messages with tier cards */}
+            <div className="lg:hidden h-full overflow-y-auto">
+              <div className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
+                <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
+                  <AnimatePresence>
+                    {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
+                  </AnimatePresence>
+                  {isSending && !isSendingImages && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
+                  <div ref={messagesEndRef} />
+                </div>
+              </div>
+            </div>
+          </>
+        ) : (
+          /* Chat Messages only (completed stage or no tiers yet) */
+          <div className="h-full overflow-y-auto">
+            <div className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
+              <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
+                <AnimatePresence>
+                  {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
+                </AnimatePresence>
+
+                {/* Typing indicator - shown when sending non-image messages */}
+                {isSending && !isSendingImages && <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}><TypingIndicator status={thinkingStatus} /></motion.div>}
+
+                <div ref={messagesEndRef} />
+              </div>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* Error */}
       <AnimatePresence>
         {error && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} className="flex-shrink-0 border-t border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/20 px-4 py-3">
-            <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} className={`flex-shrink-0 border-t border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/20 px-4 py-3 ${showCanvas ? "lg:w-[45%]" : ""}`}>
+            <div className={`flex items-center justify-between ${showCanvas ? "" : "max-w-4xl mx-auto"}`}>
               <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
               <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700">
                 <X size={16} />
@@ -1878,30 +2294,38 @@ export default function EstimatePage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
-            className="flex-shrink-0 px-3 sm:px-4 pb-2"
+            className={`flex-shrink-0 px-3 sm:px-4 pb-2 ${showCanvas ? "lg:w-[45%]" : ""}`}
           >
-            <div className="max-w-4xl mx-auto">
+            <div className={showCanvas ? "" : "max-w-4xl mx-auto"}>
               <ContextProgress />
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Input */}
-      {!isCompleted && (
-        <footer className="flex-shrink-0 border-t border-navy-100 dark:border-navy-800 bg-white dark:bg-navy-900 sticky bottom-0">
-          <div className="max-w-4xl mx-auto px-3 sm:px-4 py-2 sm:py-3">
+      {/* Input - hide when showing form, completed, or in initial image phase (before images are acknowledged) */}
+      {/* Also hide on desktop when showing CostEstimationView */}
+      {!isCompleted && !showProjectBasicsForm && !hideFooterDuringInitialPhase && (
+        <footer className={`flex-shrink-0 border-t border-navy-100 dark:border-navy-800 bg-white dark:bg-navy-900 sticky bottom-0 z-10 ${showCanvas ? "lg:w-[45%]" : ""} ${showCostEstimationView ? "lg:hidden" : ""}`}>
+          <div className={`px-3 sm:px-4 py-2 sm:py-3 ${showCanvas ? "" : "max-w-4xl mx-auto"}`}>
             <AnimatePresence>
               {pendingFiles.length > 0 && <ImagePreview files={pendingFiles} onRemove={removeFile} />}
             </AnimatePresence>
+
+            {/* Quick Action Buttons - dynamic based on entities and state */}
+            {showCanvas && canvasImages.length > 0 && !isSending && !isDetectingEntities && (
+              <div className="mb-2">
+                <QuickActionButtons
+                  onAction={handleQuickAction}
+                  disabled={isSending}
+                  entities={entities}
+                  usedActionIds={usedActionIds}
+                  hasGeneratedImages={hasGeneratedImages}
+                />
+              </div>
+            )}
+
             <div className="flex items-center gap-1.5 sm:gap-2">
-              <motion.button onClick={() => fileInputRef.current?.click()} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Attach images">
-                <Paperclip size={18} className="sm:w-5 sm:h-5" />
-              </motion.button>
-              <motion.button onClick={() => setIsCameraOpen(true)} disabled={isSending} whileTap={{ scale: 0.95 }} className="flex-shrink-0 p-2 sm:p-3 text-navy-500 dark:text-navy-400 hover:text-navy-700 dark:hover:text-navy-200 hover:bg-navy-100 dark:hover:bg-navy-800 rounded-xl transition-colors disabled:opacity-50" title="Take photo or video">
-                <Camera size={18} className="sm:w-5 sm:h-5" />
-              </motion.button>
-              <input ref={fileInputRef} type="file" multiple accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,video/quicktime" onChange={handleFileSelect} className="hidden" />
               <div className="flex-1">
                 <textarea
                   ref={textareaRef}
@@ -2114,6 +2538,20 @@ export default function EstimatePage() {
             }
           }}
           onClose={() => setShowTokenPopup(false)}
+        />
+      )}
+
+      {/* Mobile Canvas - Floating button on left that expands to show canvas */}
+      {showCanvas && canvasImages.length > 0 && (
+        <MobileCanvasExpander
+          images={canvasImages}
+          selectedImageId={selectedCanvasImageId || undefined}
+          onSelectImage={setSelectedCanvasImageId}
+          onImageClick={setLightboxImage}
+          isAnalyzing={isSendingImages && !hasGeneratedImages}
+          isGenerating={isSending && hasGeneratedImages}
+          showContinueButton={showContinueButton}
+          onContinue={handleContinueToEstimate}
         />
       )}
     </div>

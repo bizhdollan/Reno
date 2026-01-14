@@ -8,7 +8,10 @@ Handles user intent and sentiment classification:
 """
 
 from typing import Optional
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 from src.core.langgraph.utils import parse_json
 
 
@@ -135,7 +138,7 @@ class SentimentService:
         message_lower = user_message.lower()
         for keyword in restart_keywords:
             if keyword in message_lower:
-                print(f"[SentimentService] Detected restart via keyword: {keyword}")
+                logger.info(f"[SentimentService] Detected restart via keyword: {keyword}")
                 return "restart"
 
         # Use LLM for nuanced cases
@@ -160,10 +163,10 @@ class SentimentService:
             if mode not in ["additive", "restart"]:
                 mode = "additive"
 
-            print(f"[SentimentService] Detected mode: {mode} (confidence: {data.get('confidence', 0)})")
+            logger.info(f"[SentimentService] Detected mode: {mode} (confidence: {data.get('confidence', 0)})")
             return mode
         except Exception as e:
-            print(f"[SentimentService] Failed to detect mode: {e}, defaulting to additive")
+            logger.info(f"[SentimentService] Failed to detect mode: {e}, defaulting to additive")
             return "additive"
 
     async def detect_regional_scope(
@@ -203,7 +206,7 @@ class SentimentService:
                 detected_regions.update(regions)
 
         if detected_regions:
-            print(f"[SentimentService] Detected regions via keywords: {list(detected_regions)}")
+            logger.info(f"[SentimentService] Detected regions via keywords: {list(detected_regions)}")
             return list(detected_regions)
 
         # Use LLM for complex cases
@@ -232,10 +235,10 @@ class SentimentService:
                 # Return all regions if none detected (full change)
                 return valid_regions
 
-            print(f"[SentimentService] Detected regions: {regions}")
+            logger.info(f"[SentimentService] Detected regions: {regions}")
             return regions
         except Exception as e:
-            print(f"[SentimentService] Failed to detect regions: {e}")
+            logger.info(f"[SentimentService] Failed to detect regions: {e}")
             return ["floor", "walls", "ceiling", "fixtures", "furniture", "lighting"]
 
     async def classify_user_intent(
@@ -292,7 +295,7 @@ class SentimentService:
                 "confidence": data.get("confidence", 0.5)
             }
         except Exception as e:
-            print(f"[SentimentService] Failed to classify intent: {e}")
+            logger.info(f"[SentimentService] Failed to classify intent: {e}")
             return {"intent": "new_request", "confidence": 0.5}
 
     def is_positive_feedback(self, user_message: str) -> bool:

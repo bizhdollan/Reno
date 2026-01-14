@@ -5,14 +5,22 @@ Image generation functions for renovation previews.
 import uuid
 from datetime import datetime
 
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 from src.core.langgraph.prompts import (
     build_image_generation_prompt,
     build_image_regeneration_prompt,
+    build_edit_mode_prompt,
+    build_selected_image_prompt,
 )
 from src.core.langgraph.nodes.image_analysis_generation.image_helpers import (
     load_image_as_base64,
     GENERATED_IMAGES_DIR,
+)
+from src.core.langgraph.nodes.image_analysis_generation.intent_detection import (
+    detect_edit_mode,
 )
 
 
@@ -27,6 +35,8 @@ async def generate_renovation_image(
     visible_elements: dict | None = None,
     must_not_add: list[str] | None = None,
     image_scope: dict | None = None,
+    selected_image_url: str | None = None,
+    previous_changes: list[str] | None = None,
 ) -> tuple[str, str, str]:
     """
     Generate a renovation preview image using Gemini's image generation model.
@@ -44,6 +54,8 @@ async def generate_renovation_image(
         visible_elements: Dict of what's actually visible in the image
         must_not_add: List of things that should NOT be added during generation
         image_scope: Dict with frame_type, room_coverage_pct, camera_angle
+        selected_image_url: URL of user-selected canvas image (for editing that specific image)
+        previous_changes: List of changes made in previous generations (for edit mode context)
 
     Returns:
         Tuple of (image_url, generation_prompt, description)
@@ -54,22 +66,57 @@ async def generate_renovation_image(
     Raises:
         Exception: If image generation fails
     """
-    print(f"[image_generation] Starting generation for {project_type} project...")
+    logger.info(f"[image_generation] Starting generation for {project_type} project...")
 
     # Log scope information for debugging
     if image_scope:
-        print(f"[image_generation] Image scope: {image_scope.get('frame_type', 'unknown')} (~{image_scope.get('room_coverage_pct', 100)}% coverage)")
+        logger.info(f"[image_generation] Image scope: {image_scope.get('frame_type', 'unknown')} (~{image_scope.get('room_coverage_pct', 100)}% coverage)")
     if must_not_add:
-        print(f"[image_generation] Must NOT add: {must_not_add[:3]}..." if len(must_not_add) > 3 else f"[image_generation] Must NOT add: {must_not_add}")
+        logger.info(f"[image_generation] Must NOT add: {must_not_add[:3]}..." if len(must_not_add) > 3 else f"[image_generation] Must NOT add: {must_not_add}")
 
     # Ensure generated images directory exists
     GENERATED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Build the generation prompt
+    # Determine which image to use as base
+    # Priority: selected_image_url > original_image_urls[0]
+    base_image_url = selected_image_url or (original_image_urls[0] if original_image_urls else None)
+    if selected_image_url:
+        logger.info(f"[image_generation] Using SELECTED canvas image as base: {selected_image_url}")
+    else:
+        logger.info(f"[image_generation] Using original image as base")
+
+    # Build the generation prompt with intelligent edit mode detection
+    edit_mode_result = None
     if feedback and previous_prompt:
-        # Regeneration with feedback
-        generation_prompt = build_image_regeneration_prompt(previous_prompt, feedback)
-        print(f"[image_generation] Regenerating with feedback: {feedback}")
+        # Detect edit mode for intelligent prompt building
+        feedback_text = feedback[0] if isinstance(feedback, list) and len(feedback) == 1 else (
+            " ".join(feedback) if isinstance(feedback, list) else str(feedback)
+        )
+
+        edit_mode_result = await detect_edit_mode(
+            user_feedback=feedback_text,
+            previous_changes=previous_changes,
+            image_url=selected_image_url
+        )
+
+        edit_mode = edit_mode_result.get("edit_mode", "modify")
+        logger.info(f"[image_generation] Edit mode detected: {edit_mode}")
+
+        # Check if user approved (no regeneration needed)
+        if edit_mode == "approve":
+            logger.info(f"[image_generation] User approved - no regeneration needed")
+            # Return the selected image as-is if available
+            if selected_image_url:
+                return selected_image_url, previous_prompt, "User approved the current design."
+            # Otherwise fall through to normal generation
+
+        # Build prompt using the intelligent edit mode system
+        generation_prompt = build_edit_mode_prompt(
+            base_prompt=previous_prompt,
+            edit_mode_result=edit_mode_result,
+            user_feedback=feedback_text
+        )
+        logger.info(f"[image_generation] Regenerating with {edit_mode} mode: {feedback}")
     else:
         # Initial generation with features to retain and scope constraints
         generation_prompt = build_image_generation_prompt(
@@ -81,15 +128,14 @@ async def generate_renovation_image(
             must_not_add=must_not_add,
             image_scope=image_scope,
         )
-        print(f"[image_generation] Initial generation (retaining: {features_to_retain}, scope: {image_scope})")
+        logger.info(f"[image_generation] Initial generation (retaining: {features_to_retain}, scope: {image_scope})")
 
-    # Load the first original image as base64 for input
-    # (Using first image as primary reference)
-    if not original_image_urls:
-        raise ValueError("No original images provided for generation")
+    # Load the base image as base64 for input
+    # Priority: selected_image_url > original_image_urls[0]
+    if not base_image_url:
+        raise ValueError("No image provided for generation (need either selected_image_url or original_image_urls)")
 
-    primary_image_url = original_image_urls[0]
-    image_data_url = await load_image_as_base64(primary_image_url)
+    image_data_url = await load_image_as_base64(base_image_url)
 
     # Prepare messages for VGM with transformation-focused system message
     system_message = """You are an IMAGE TRANSFORMATION specialist, NOT a room designer.
@@ -134,10 +180,10 @@ The output image MUST be recognizable as the SAME SPACE from the SAME ANGLE as t
 
         if frame_type == "corner_view" or coverage <= 30:
             temperature = 0.3  # Very faithful to original for corner views
-            print(f"[image_generation] Using low temperature (0.3) for corner/partial view")
+            logger.info(f"[image_generation] Using low temperature (0.3) for corner/partial view")
         elif frame_type == "wall_view" or coverage <= 60:
             temperature = 0.4  # Moderately faithful for wall views
-            print(f"[image_generation] Using medium temperature (0.4) for wall view")
+            logger.info(f"[image_generation] Using medium temperature (0.4) for wall view")
         else:
             temperature = 0.5  # Standard for full room views
     else:
@@ -174,8 +220,8 @@ The output image MUST be recognizable as the SAME SPACE from the SAME ANGLE as t
         with open(file_path, "wb") as f:
             f.write(image_data)
 
-        print(f"[image_generation] Saved generated image to {file_path}")
-        print(f"[image_generation] Description: {description[:150]}..." if len(description) > 150 else f"[image_generation] Description: {description}")
+        logger.info(f"[image_generation] Saved generated image to {file_path}")
+        logger.info(f"[image_generation] Description: {description[:150]}..." if len(description) > 150 else f"[image_generation] Description: {description}")
 
         # Return API URL, prompt, and description
         api_url = f"/api/v1/files/generated/{filename}"
@@ -183,5 +229,5 @@ The output image MUST be recognizable as the SAME SPACE from the SAME ANGLE as t
         return api_url, generation_prompt, description
 
     except Exception as e:
-        print(f"[image_generation] ERROR: {e}")
+        logger.info(f"[image_generation] ERROR: {e}")
         raise Exception(f"Failed to generate renovation image: {str(e)}") from e

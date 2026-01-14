@@ -21,7 +21,10 @@ from typing import Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
 
+from src.core.logger import get_logger
 from src.db.database import SessionLocal
+
+logger = get_logger(__name__)
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.state import ProjectState
 # Import from submodules to avoid circular imports
@@ -317,7 +320,7 @@ class ServiceIntegration:
             )
             return updated_data, True
         except Exception as e:
-            print(f"[ServiceIntegration] Correction failed: {e}")
+            logger.error(f"[ServiceIntegration] Correction failed: {e}", exc_info=True)
             return current_data, False
 
     async def handle_undo(self) -> tuple[bool, str]:

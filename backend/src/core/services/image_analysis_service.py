@@ -14,7 +14,10 @@ from typing import Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
 
+from src.core.logger import get_logger
 from src.db.models import ImageAnalysis, ImageMetadata
+
+logger = get_logger(__name__)
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.utils import parse_json
 from src.core.langgraph.nodes.image_analysis_generation.image_helpers import load_image_as_base64
@@ -61,7 +64,7 @@ class ImageAnalysisService:
         Returns:
             ImageAnalysis object with extracted_features and critical_elements
         """
-        print(f"[ImageAnalysisService] Analyzing image: {image_url[:50]}...")
+        logger.info(f"[ImageAnalysisService] Analyzing image: {image_url[:50]}...")
 
         # Load image as base64
         image_data = await load_image_as_base64(image_url)
@@ -92,7 +95,7 @@ class ImageAnalysisService:
         try:
             features = parse_json(response)
         except Exception as e:
-            print(f"[ImageAnalysisService] Failed to parse response: {e}")
+            logger.info(f"[ImageAnalysisService] Failed to parse response: {e}")
             features = {}
 
         # Extract room type
@@ -121,7 +124,7 @@ class ImageAnalysisService:
         self.cache.set_image_analysis(analysis.id, analysis)
         self.cache.set_critical_elements(analysis.id, critical)
 
-        print(f"[ImageAnalysisService] Analysis complete: room_type={room_type}, confidence={confidence}")
+        logger.info(f"[ImageAnalysisService] Analysis complete: room_type={room_type}, confidence={confidence}")
         return analysis
 
     async def extract_critical_elements(
@@ -193,7 +196,7 @@ Return valid JSON only, no markdown."""
             )
             return parse_json(response)
         except Exception as e:
-            print(f"[ImageAnalysisService] Failed to extract critical elements: {e}")
+            logger.info(f"[ImageAnalysisService] Failed to extract critical elements: {e}")
             return {}
 
     async def validate_room_consistency(

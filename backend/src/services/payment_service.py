@@ -7,6 +7,10 @@ import os
 import stripe
 from typing import Dict, Optional
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 # Initialize Stripe
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 
@@ -40,7 +44,7 @@ class PaymentService:
         """
         if not self.api_key:
             # Return mock checkout URL for testing
-            print(f"⚠️ STRIPE_SECRET_KEY not set, returning mock checkout URL")
+            logger.warning(f"STRIPE_SECRET_KEY not set, returning mock checkout URL")
             return {
                 'checkout_url': f"{self.base_url}/unlock/success?unlock_token={unlock_token}",
                 'session_id': f'mock_session_{unlock_token}'
@@ -76,10 +80,10 @@ class PaymentService:
             }
         
         except stripe.error.StripeError as e:
-            print(f"Stripe error: {str(e)}")
+            logger.error(f"Stripe error: {str(e)}", exc_info=True)
             raise
         except Exception as e:
-            print(f"Payment setup error: {str(e)}")
+            logger.error(f"Payment setup error: {str(e)}", exc_info=True)
             raise
     
     def verify_webhook_signature(
@@ -92,7 +96,7 @@ class PaymentService:
         """
         webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
         if not webhook_secret:
-            print("⚠️ STRIPE_WEBHOOK_SECRET not set, skipping verification")
+            logger.warning("STRIPE_WEBHOOK_SECRET not set, skipping verification")
             # For testing, create a mock event
             import json
             return json.loads(payload.decode())
@@ -103,7 +107,7 @@ class PaymentService:
             )
             return event
         except stripe.error.SignatureVerificationError as e:
-            print(f"Webhook signature verification failed: {str(e)}")
+            logger.error(f"Webhook signature verification failed: {str(e)}", exc_info=True)
             raise
     
     def get_session(self, session_id: str) -> Optional[stripe.checkout.Session]:
@@ -116,7 +120,7 @@ class PaymentService:
         try:
             return stripe.checkout.Session.retrieve(session_id)
         except Exception as e:
-            print(f"Error retrieving session: {str(e)}")
+            logger.error(f"Error retrieving session: {str(e)}", exc_info=True)
             return None
 
 

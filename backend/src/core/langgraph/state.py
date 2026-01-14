@@ -183,6 +183,9 @@ class ProjectState(TypedDict, total=False):
     generated_image_history: list[dict] | None
     selected_final_image_url: str | None
 
+    # Currently selected canvas image (from frontend for edit context)
+    selected_image_url: str | None
+
     # Original image features - DEPRECATED: Now in image_analysis.critical_elements
     original_features_to_retain: list[str] | None
     brief_room_summary: str | None
@@ -249,6 +252,7 @@ def create_initial_state(project_id: str | None = None) -> ProjectState:
         # Image history and features
         generated_image_history=[],
         selected_final_image_url=None,
+        selected_image_url=None,
         original_features_to_retain=None,
         brief_room_summary=None,
         # Expert suggestions flow

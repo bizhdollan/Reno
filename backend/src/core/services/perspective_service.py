@@ -11,7 +11,10 @@ from typing import Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
 
+from src.core.logger import get_logger
 from src.db.models import ImageMetadata, ImageAnalysis
+
+logger = get_logger(__name__)
 from src.core.llm.provider import LLMProvider
 from src.core.langgraph.utils import parse_json
 from src.core.langgraph.nodes.image_analysis_generation.image_helpers import load_image_as_base64
@@ -79,7 +82,7 @@ class PerspectiveService:
         Returns:
             ImageMetadata with perspective_type and confidence
         """
-        print(f"[PerspectiveService] Detecting perspective for image: {image_url[:50]}...")
+        logger.info(f"[PerspectiveService] Detecting perspective for image: {image_url[:50]}...")
 
         # Load image as base64
         image_data = await load_image_as_base64(image_url)
@@ -110,7 +113,7 @@ class PerspectiveService:
             confidence = data.get("confidence", 0.5)
             reasoning = data.get("reasoning", "")
         except Exception as e:
-            print(f"[PerspectiveService] Failed to parse response: {e}")
+            logger.info(f"[PerspectiveService] Failed to parse response: {e}")
             perspective_type = "front"
             confidence = 0.5
             reasoning = "Detection failed, defaulting to front view"
@@ -137,7 +140,7 @@ class PerspectiveService:
         # Cache the metadata
         self.cache.set_image_metadata(metadata.id, metadata)
 
-        print(f"[PerspectiveService] Detected: {perspective_type} (confidence: {confidence})")
+        logger.info(f"[PerspectiveService] Detected: {perspective_type} (confidence: {confidence})")
         return metadata
 
     def build_perspective_constraint(
@@ -158,7 +161,7 @@ class PerspectiveService:
             Constraint string or empty if confidence too low
         """
         if confidence < min_confidence:
-            print(f"[PerspectiveService] Confidence {confidence} below threshold {min_confidence}, skipping constraint")
+            logger.info(f"[PerspectiveService] Confidence {confidence} below threshold {min_confidence}, skipping constraint")
             return ""
 
         perspective_descriptions = {

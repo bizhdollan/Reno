@@ -1,10 +1,12 @@
 import asyncio
 import json
-import logging
 from enum import Enum
 from datetime import datetime, timedelta
 
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 from src.core.langgraph.state import (
     ProjectState,
     merge_image_analyses_to_extracted,
@@ -52,8 +54,6 @@ from src.core.langgraph.nodes.image_analysis_generation.node_services import (
     check_undo_request,
 )
 
-# Initialize logger
-logger = logging.getLogger(__name__)
 
 # State constants
 class ImageSubState(str, Enum):
@@ -99,16 +99,16 @@ async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_
         # Get project
         project = db.query(Project).filter(Project.token == project_id_token).first()
         if not project:
-            print(f"[inspirations] Project not found: {project_id_token}")
+            logger.info(f"[inspirations] Project not found: {project_id_token}")
             return None
 
         # Check if inspirations already available AND complete (not pending Tavily)
         if project.renovation_inspirations:
             if not project.renovation_inspirations.get("_tavily_pending"):
-                print(f"[inspirations] Retrieved complete inspirations for {project_id_token}")
+                logger.info(f"[inspirations] Retrieved complete inspirations for {project_id_token}")
                 return project.renovation_inspirations
             else:
-                print(f"[inspirations] Inspirations exist but Tavily search pending, waiting...")
+                logger.info(f"[inspirations] Inspirations exist but Tavily search pending, waiting...")
 
         # Need to wait: either no inspirations or Tavily pending
         # Wait with retries
@@ -122,23 +122,23 @@ async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_
             if project.renovation_inspirations:
                 # Check if Tavily search completed (no pending flag)
                 if not project.renovation_inspirations.get("_tavily_pending"):
-                    print(f"[inspirations] Complete inspirations available after {elapsed:.1f}s")
+                    logger.info(f"[inspirations] Complete inspirations available after {elapsed:.1f}s")
                     return project.renovation_inspirations
                 else:
-                    print(f"[inspirations] Tavily still pending... ({elapsed:.1f}s/{max_wait_seconds}s)")
+                    logger.info(f"[inspirations] Tavily still pending... ({elapsed:.1f}s/{max_wait_seconds}s)")
             else:
-                print(f"[inspirations] Still waiting for inspirations... ({elapsed:.1f}s/{max_wait_seconds}s)")
+                logger.info(f"[inspirations] Still waiting for inspirations... ({elapsed:.1f}s/{max_wait_seconds}s)")
 
         # Timeout reached - return whatever we have (even if pending)
         if project.renovation_inspirations:
-            print(f"[inspirations] Timeout reached, returning partial inspirations (Tavily may be pending)")
+            logger.info(f"[inspirations] Timeout reached, returning partial inspirations (Tavily may be pending)")
             return project.renovation_inspirations
 
-        print(f"[inspirations] Timeout reached, no inspirations available")
+        logger.info(f"[inspirations] Timeout reached, no inspirations available")
         return None
 
     except Exception as e:
-        print(f"[inspirations] Error retrieving inspirations: {e}")
+        logger.info(f"[inspirations] Error retrieving inspirations: {e}")
         return None
     finally:
         db.close()
@@ -243,7 +243,7 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
 
     project_type = state.get("project_type", "renovation")
 
-    print(f"[image_analysis] SUB_STATE: {sub_state} | user_message={user_message!r} | "
+    logger.info(f"[image_analysis] SUB_STATE: {sub_state} | user_message={user_message!r} | "
           f"new_images={len(new_image_urls)} | stored_analyses={len(image_analyses)}")
 
     # =========================================================================
@@ -251,7 +251,7 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
     # =========================================================================
     if sub_state == "analyzing":
         if new_image_urls:
-            print(f"[image_analysis] Processing {len(new_image_urls)} images in parallel...")
+            logger.info(f"[image_analysis] Processing {len(new_image_urls)} images in parallel...")
 
             # Get project_id for event broadcasting
             project_id_for_events = state.get("project_id")
@@ -294,9 +294,9 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
             updates["_image_scope"] = image_scope
             updates["_must_not_add"] = must_not_add
 
-            print(f"[image_analysis] Features to retain: {features_to_retain}")
-            print(f"[image_analysis] Image scope: {image_scope.get('frame_type')} (~{image_scope.get('room_coverage_pct')}%)")
-            print(f"[image_analysis] Must NOT add: {must_not_add}")
+            logger.info(f"[image_analysis] Features to retain: {features_to_retain}")
+            logger.info(f"[image_analysis] Image scope: {image_scope.get('frame_type')} (~{image_scope.get('room_coverage_pct')}%)")
+            logger.info(f"[image_analysis] Must NOT add: {must_not_add}")
 
             # Store brief summary
             brief_summary = summary_result.get("brief_summary", f"A {project_type} space.")
@@ -323,9 +323,9 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
 
                     # Update conversation phase
                     updates["conversation_phase"] = "ideating"
-                    print(f"[image_analysis] Stored {len(image_analyses)} analyses in DB")
+                    logger.info(f"[image_analysis] Stored {len(image_analyses)} analyses in DB")
                 except Exception as e:
-                    print(f"[image_analysis] DB storage failed (continuing with state): {e}")
+                    logger.info(f"[image_analysis] DB storage failed (continuing with state): {e}")
 
             # Emit analysis_complete event for SSE streaming
             if project_id_for_events:
@@ -348,13 +348,13 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
 
                     # Debug: Log the raw search_context data
                     raw_search_context = extracted_data.get("search_context", {})
-                    print(f"[image_analysis] DEBUG search_context raw: {raw_search_context}")
-                    print(f"[image_analysis] DEBUG search_insights: era={search_insights.detected_era}, "
+                    logger.info(f"[image_analysis] DEBUG search_context raw: {raw_search_context}")
+                    logger.info(f"[image_analysis] DEBUG search_insights: era={search_insights.detected_era}, "
                           f"style={search_insights.style_assessment}, problems={search_insights.problem_areas}, "
                           f"scope={search_insights.renovation_scope}, materials={search_insights.material_indicators}")
 
                     if search_insights.has_useful_context():
-                        print(f"[image_analysis] 🎯 Extracted search insights: era={search_insights.detected_era}, "
+                        logger.info(f"[image_analysis] 🎯 Extracted search insights: era={search_insights.detected_era}, "
                               f"style={search_insights.style_assessment}, problems={search_insights.problem_areas[:2]}")
 
                         # Get project UUID from database for smart search
@@ -369,16 +369,16 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                                     zip_code=zip_code,
                                     search_insights=search_insights
                                 )
-                                print(f"[image_analysis] 🚀 Started smart Tavily search for {project_type} in {zip_code}")
+                                logger.info(f"[image_analysis] 🚀 Started smart Tavily search for {project_type} in {zip_code}")
                             else:
-                                print(f"[image_analysis] ⚠️  Project not found for token {project_id_token}")
+                                logger.info(f"[image_analysis] ⚠️  Project not found for token {project_id_token}")
                                 # Emit context_ready since no smart search will run
                                 from src.core.services.event_broadcaster import emit_context_ready
                                 asyncio.create_task(emit_context_ready(project_id_token))
                         finally:
                             db.close()
                     else:
-                        print(f"[image_analysis] ⚠️  No useful search context extracted from images")
+                        logger.info(f"[image_analysis] ⚠️  No useful search context extracted from images")
                         # Emit context_ready since no smart search will run
                         from src.core.services.event_broadcaster import emit_context_ready
                         db = SessionLocal()
@@ -389,7 +389,7 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                         finally:
                             db.close()
                 except Exception as e:
-                    print(f"[image_analysis] ⚠️  Smart search trigger failed: {e}")
+                    logger.info(f"[image_analysis] ⚠️  Smart search trigger failed: {e}")
                     # Emit context_ready on error so frontend isn't blocked
                     from src.core.services.event_broadcaster import emit_context_ready
                     db = SessionLocal()
@@ -534,13 +534,13 @@ async def _handle_design_conversation(
             try:
                 budget_context = await services.detect_budget_if_mentioned(user_message)
                 if budget_context:
-                    print(f"[design_conversation] Budget context detected: {budget_context.get('sentiment')}")
+                    logger.info(f"[design_conversation] Budget context detected: {budget_context.get('sentiment')}")
                     # Store in context_cache for generation phase
                     context_cache = dict(state.get("context_cache", {}))
                     context_cache["budget_context"] = budget_context
                     updates["context_cache"] = context_cache
             except Exception as e:
-                print(f"[design_conversation] Budget detection failed: {e}")
+                logger.info(f"[design_conversation] Budget detection failed: {e}")
 
         # Check if user is selecting from pending suggestions
         pending_suggestions = state.get("pending_suggestions", [])
@@ -548,7 +548,7 @@ async def _handle_design_conversation(
             selected_indices = _parse_option_selection(user_message, pending_suggestions)
 
             if selected_indices:
-                print(f"[design_conversation] Option selection detected: indices {selected_indices}")
+                logger.info(f"[design_conversation] Option selection detected: indices {selected_indices}")
                 selected_options = [pending_suggestions[i] for i in selected_indices if i < len(pending_suggestions)]
 
                 if len(selected_options) == 1:
@@ -597,7 +597,7 @@ async def _handle_design_conversation(
             expertise_level = unified_result.get("expertise_level", "novice")
             updates["expertise_level"] = expertise_level
 
-        print(f"[design_conversation] Intent: {primary_intent} | secondary: {secondary_intents}")
+        logger.info(f"[design_conversation] Intent: {primary_intent} | secondary: {secondary_intents}")
 
         # Handle corrections
         if primary_intent == "correction" or "correction" in secondary_intents:
@@ -613,7 +613,7 @@ async def _handle_design_conversation(
                     updates["extracted_data"] = corrected_data
                     extracted_data = corrected_data
                 except Exception as e:
-                    print(f"[design_conversation] Correction service failed, using legacy: {e}")
+                    logger.info(f"[design_conversation] Correction service failed, using legacy: {e}")
                     corrected_data = await apply_user_correction(extracted_data, corrections, project_type)
                     updates["extracted_data"] = corrected_data
                     extracted_data = corrected_data
@@ -658,14 +658,14 @@ async def _handle_design_conversation(
 
             # Retrieve renovation inspirations from database with wait logic
             project_id_token = state.get("project_id")
-            print(f"[design_conversation] Retrieving inspirations for {project_id_token}...")
+            logger.info(f"[design_conversation] Retrieving inspirations for {project_id_token}...")
             inspirations = await get_renovation_inspirations_with_wait(project_id_token)
 
             if inspirations:
                 location = inspirations.get("location", {})
-                print(f"[design_conversation] Using inspirations for {location.get('city', 'Unknown')}, {location.get('state_code', 'Unknown')}")
+                logger.info(f"[design_conversation] Using inspirations for {location.get('city', 'Unknown')}, {location.get('state_code', 'Unknown')}")
             else:
-                print(f"[design_conversation] No inspirations available, generating generic suggestions")
+                logger.info(f"[design_conversation] No inspirations available, generating generic suggestions")
 
             suggestions_result = await generate_expert_suggestions(
                 project_type=project_type,
@@ -847,7 +847,7 @@ async def _handle_generating(
     use_services: bool = False
 ) -> dict:
     """Handle the generating sub-state."""
-    print("[image_analysis] Generating renovation preview image(s)...")
+    logger.info("[image_analysis] Generating renovation preview image(s)...")
 
     original_image_urls = [img["url"] for img in image_analyses]
     features_to_retain = state.get("original_features_to_retain", [])
@@ -887,7 +887,7 @@ async def _handle_generating(
             )
             generated_results = [{"url": generated_url, "description": description, "perspective": 0}]
         except Exception as e:
-            print(f"[image_analysis] Image generation failed: {e}")
+            logger.info(f"[image_analysis] Image generation failed: {e}")
             generated_url = get_placeholder_image_url()
             generation_prompt = ""
             description = ""
@@ -947,31 +947,10 @@ async def _handle_generating(
     updates["image_sub_state"] = "confirming_proposal"
     updates["conversation_phase"] = "reviewing"  # NEW: Update conversation phase
 
-    # NEW: Store generation in DB when services available
-    if use_services and services and generated_url and not updates.get("_generation_error"):
-        try:
-            from uuid import UUID
-
-            # Get active image analysis ID
-            active_image_id = state.get("active_image_id")
-            if active_image_id:
-                # Get budget context if available
-                context_cache = state.get("context_cache", {})
-                budget_context = context_cache.get("budget_context", {})
-
-                # Store generation history
-                gen_record = await services.generation.generate_initial(
-                    image_analysis_id=UUID(active_image_id),
-                    vision=renovation_vision.get("raw_input", "") if renovation_vision else "",
-                    critical_elements={"features_to_retain": features_to_retain},
-                    perspective_constraint=""
-                )
-
-                # Update active generation ID
-                updates["active_generation_id"] = str(gen_record.id)
-                print(f"[_handle_generating] Stored generation in DB: {gen_record.id}")
-        except Exception as e:
-            print(f"[_handle_generating] DB storage failed (continuing): {e}")
+    # NOTE: DB storage via services.generation.generate_initial() was removed
+    # because it tries to regenerate the image when we already have it generated.
+    # The image URL is already stored in state and image_history.
+    # TODO: Add a proper store_generation_record() method if DB tracking is needed.
 
     # Build response
     error_note = ""
@@ -1172,7 +1151,7 @@ async def _handle_confirming_proposal(
     # go directly to regeneration to avoid infinite loops
     pending_regeneration = state.get("_pending_regeneration")
     if pending_regeneration:
-        print(f"[confirming_proposal] Handling pending regeneration from final_review: {pending_regeneration}")
+        logger.info(f"[confirming_proposal] Handling pending regeneration from final_review: {pending_regeneration}")
         updates["_pending_regeneration"] = None
         # Directly handle as a regeneration request - final_review already classified this
         conv_type = {
@@ -1197,7 +1176,7 @@ async def _handle_confirming_proposal(
                 selected_idx = selected_indices[0]
                 if selected_idx < len(all_suggestions):
                     opt = all_suggestions[selected_idx]
-                    print(f"[confirming_proposal] Switching to option {selected_idx + 1}: {opt.get('style_name')}")
+                    logger.info(f"[confirming_proposal] Switching to option {selected_idx + 1}: {opt.get('style_name')}")
 
                     # Update renovation vision with the new selected option
                     new_renovation_vision = {
@@ -1259,7 +1238,7 @@ async def _handle_confirming_proposal(
                             f"How's this? Say **'continue'** when ready, or request more changes."
                         )
                     except Exception as e:
-                        print(f"[confirming_proposal] Option switch generation failed: {e}")
+                        logger.info(f"[confirming_proposal] Option switch generation failed: {e}")
                         response = f"I encountered an issue generating the new option. Please try again or request specific changes."
 
                     updates["messages"] = [{"role": "assistant", "content": response}]
@@ -1282,7 +1261,7 @@ async def _handle_confirming_proposal(
             "generation_changes": unified_result.get("extracted_content", {}).get("generation_changes")
         }
 
-        print(f"[confirming_proposal] Conversation type: {conversation_type} (confidence: {conv_type['confidence']})")
+        logger.info(f"[confirming_proposal] Conversation type: {conversation_type} (confidence: {conv_type['confidence']})")
 
         if conversation_type == "discussion":
             question = conv_type.get("extracted_question") or user_message
@@ -1327,9 +1306,8 @@ async def _handle_confirming_proposal(
                         img["user_satisfied"] = True
                 updates["generated_image_history"] = image_history
             updates["selected_final_image_url"] = current_generated_url
-            updates["current_stage"] = "final_review"
-            # Flag to tell final_review to show summary first (don't process user message)
-            updates["_show_final_review_summary"] = True
+            # Skip final_review and go directly to cost_estimation (simplified flow)
+            updates["current_stage"] = "cost_estimation"
             updates["awaiting_user_input"] = False
             updates["messages"] = []
             return updates
@@ -1417,9 +1395,9 @@ async def _handle_regeneration(
                 regen_mode = "style_change"
             elif regen_mode == "additive":
                 regen_mode = "iterative_refinement"
-            print(f"[_handle_regeneration] Service detected mode: {regen_mode}, regions: {regions}")
+            logger.info(f"[_handle_regeneration] Service detected mode: {regen_mode}, regions: {regions}")
         except Exception as e:
-            print(f"[_handle_regeneration] Sentiment service failed, using legacy: {e}")
+            logger.info(f"[_handle_regeneration] Sentiment service failed, using legacy: {e}")
             mode_result = await detect_regeneration_mode(feedback_content, current_description)
             regen_mode = mode_result.get("mode", "iterative_refinement")
     else:
@@ -1439,18 +1417,96 @@ async def _handle_regeneration(
         updates["awaiting_user_input"] = True
         return updates
 
-    existing_feedback = state.get("image_generation_feedback", [])
-    feedback_list = [str(f) for f in existing_feedback]
-    feedback_list.append(str(feedback_content))
-    updates["image_generation_feedback"] = feedback_list
-
+    # Get selected image URL from state (user may have selected a specific canvas image)
+    selected_image_url = state.get("selected_image_url")
     last_generated_url = state.get("last_generated_image_url", "")
     stored_generation_prompt = state.get("generation_prompt", "")
 
-    if regen_mode == "style_change":
-        base_image_urls = stored_original_urls
+    # Helper to check if URL is an original (uploaded) image vs generated
+    def is_original_image(url: str) -> bool:
+        if not url:
+            return False
+        return "/generated/" not in url
+
+    # Helper to check if URL is a generated image
+    def is_generated_image(url: str) -> bool:
+        if not url:
+            return False
+        return "/generated/" in url
+
+    # Determine if user is starting fresh from original image
+    # or continuing edits on a generated image
+    user_selected_original = selected_image_url and is_original_image(selected_image_url)
+    user_selected_different_generated = (
+        selected_image_url and
+        is_generated_image(selected_image_url) and
+        selected_image_url != last_generated_url
+    )
+
+    # If user selected an ORIGINAL image, treat as fresh start
+    # Reset all edit history - they want to start over from their original photo
+    if user_selected_original:
+        logger.info(f"[_handle_regeneration] User selected ORIGINAL image - resetting edit history")
         feedback_list = [str(feedback_content)]
         updates["image_generation_feedback"] = feedback_list
+        updates["generation_description"] = ""  # Clear previous description
+        previous_changes = []
+        regen_mode = "style_change"  # Treat as fresh generation
+    elif user_selected_different_generated:
+        # User selected a different generated image from history
+        # Try to get the description for that specific image
+        logger.info(f"[_handle_regeneration] User selected different generated image - checking history")
+        image_description_for_selected = None
+        for hist_img in image_history:
+            if hist_img.get("url") == selected_image_url:
+                image_description_for_selected = hist_img.get("description", "")
+                break
+
+        # Start fresh from that point with only current feedback
+        feedback_list = [str(feedback_content)]
+        updates["image_generation_feedback"] = feedback_list
+
+        # Use description from that image for context
+        previous_changes = []
+        if image_description_for_selected:
+            for line in image_description_for_selected.split('\n'):
+                line = line.strip()
+                if line.startswith(('•', '-', '*')) or (len(line) > 0 and line[0].isdigit() and '.' in line[:3]):
+                    change = line.lstrip('•-*0123456789. ')
+                    if change and len(change) > 5:
+                        previous_changes.append(change)
+    elif regen_mode == "style_change":
+        # Explicit style change request - reset feedback
+        feedback_list = [str(feedback_content)]
+        updates["image_generation_feedback"] = feedback_list
+        previous_changes = []
+    else:
+        # Iterative refinement on current image
+        # IMPORTANT: Only use the CURRENT request as feedback, not accumulated previous requests.
+        # Previous changes are already captured in the image description and passed via previous_changes.
+        # Accumulating feedback causes the VGM to re-apply old changes that were already made.
+        feedback_list = [str(feedback_content)]
+        updates["image_generation_feedback"] = feedback_list
+
+        # Get previous changes from the current description for context
+        # This tells the VGM what was already done on this image
+        current_description = state.get("generation_description", "")
+        previous_changes = []
+        if current_description:
+            # Extract bullet points from description as previous changes
+            for line in current_description.split('\n'):
+                line = line.strip()
+                if line.startswith(('•', '-', '*')) or (len(line) > 0 and line[0].isdigit() and '.' in line[:3]):
+                    change = line.lstrip('•-*0123456789. ')
+                    if change and len(change) > 5:
+                        previous_changes.append(change)
+
+        logger.info(f"[_handle_regeneration] Current feedback: {feedback_list}")
+        logger.info(f"[_handle_regeneration] Previous changes (from description): {previous_changes[:3]}..." if len(previous_changes) > 3 else f"[_handle_regeneration] Previous changes: {previous_changes}")
+
+    # Set base image URLs based on mode
+    if user_selected_original or regen_mode == "style_change":
+        base_image_urls = stored_original_urls
     else:
         base_image_urls = [last_generated_url] if last_generated_url else stored_original_urls
 
@@ -1466,6 +1522,8 @@ async def _handle_regeneration(
             visible_elements=visible_elements,
             must_not_add=must_not_add,
             image_scope=image_scope,
+            selected_image_url=selected_image_url,
+            previous_changes=previous_changes,
         )
 
         image_history = add_to_image_history(
@@ -1489,7 +1547,7 @@ async def _handle_regeneration(
             f"How's this? Say **'continue'** when ready, or request more changes."
         )
     except Exception as e:
-        print(f"[confirming_proposal] Regeneration failed: {e}")
+        logger.info(f"[confirming_proposal] Regeneration failed: {e}")
         response = f"I encountered an issue. Say **'continue'** to proceed or try a different request."
 
     updates["messages"] = [{"role": "assistant", "content": response}]
@@ -1517,9 +1575,24 @@ async def _handle_multi_image_regeneration(
     image_scope = state.get("_image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
     must_not_add = state.get("_must_not_add", [])
 
+    # Get selected image URL from state
+    selected_image_url = state.get("selected_image_url")
+
     async def regenerate_single_image(img_idx: int, specific_feedback: str):
         try:
             base_url = generated_options[img_idx].get("url") if img_idx < len(generated_options) else stored_original_urls[0]
+
+            # Get previous changes from the option's description
+            prev_description = generated_options[img_idx].get("description", "") if img_idx < len(generated_options) else ""
+            prev_changes = []
+            if prev_description:
+                for line in prev_description.split('\n'):
+                    line = line.strip()
+                    if line.startswith(('•', '-', '*')) or (len(line) > 0 and line[0].isdigit() and '.' in line[:3]):
+                        change = line.lstrip('•-*0123456789. ')
+                        if change and len(change) > 5:
+                            prev_changes.append(change)
+
             url, prompt, desc = await generate_renovation_image(
                 original_image_urls=[base_url],
                 project_type=project_type,
@@ -1531,6 +1604,8 @@ async def _handle_multi_image_regeneration(
                 visible_elements=visible_elements,
                 must_not_add=must_not_add,
                 image_scope=image_scope,
+                selected_image_url=selected_image_url,
+                previous_changes=prev_changes,
             )
             return {"position": img_idx + 1, "url": url, "description": desc, "success": True}
         except Exception as e:

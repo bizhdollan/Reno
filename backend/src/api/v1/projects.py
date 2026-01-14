@@ -10,7 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional
 
+from src.core.logger import get_logger
 from src.db.database import get_db
+
+logger = get_logger(__name__)
 from src.db.models import Project, ConversationState
 from src.db.schemas import (
     ProjectSaveRequest,
@@ -95,7 +98,7 @@ async def save_project(
             email_sent = True
             
         except Exception as e:
-            print(f"⚠️ Email sending failed but project saved: {e}")
+            logger.warning(f"Email sending failed but project saved: {e}")
             # Don't fail the request if email fails
             email_sent = False
     
@@ -226,9 +229,9 @@ async def mark_project_complete_homeowner(
         from datetime import datetime, UTC
         project.status = "completed"
         project.completed_at = datetime.now(UTC)
-        print(f"[complete] Project {token} fully completed by both parties")
+        logger.info(f"[complete] Project {token} fully completed by both parties")
     else:
-        print(f"[complete] Homeowner marked complete for {token}, waiting for contractor")
+        logger.info(f"[complete] Homeowner marked complete for {token}, waiting for contractor")
 
     db.commit()
     db.refresh(project)

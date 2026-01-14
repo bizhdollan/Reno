@@ -8,7 +8,10 @@ Provides utilities for:
 
 import re
 from typing import Optional, Dict
+from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
+
+logger = get_logger(__name__)
 
 
 def validate_us_zip_code(zip_code: str) -> bool:
@@ -109,7 +112,7 @@ If the zip code is invalid or you don't know the location, return:
             return None
 
     except Exception as e:
-        print(f"[location_service] Failed to extract location from zip {zip_code}: {e}")
+        logger.error(f"[location_service] Failed to extract location from zip {zip_code}: {e}")
         return None
 
 
