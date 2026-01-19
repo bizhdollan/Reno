@@ -17,6 +17,10 @@ from typing import TypedDict, Literal, Annotated, Any, Optional
 from uuid import UUID
 from langgraph.graph.message import add_messages
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 # Stage types
 Stage = Literal[
@@ -296,15 +300,33 @@ def create_minimal_state(project_id: str) -> ProjectState:
 
 
 def get_missing_basics(state: ProjectState) -> list[str]:
-    """Return list of missing project basic fields."""
-    missing = []
-    if not state.get("project_title"):
-        missing.append("project_title")
-    if not state.get("project_type"):
-        missing.append("project_type")
-    if not state.get("zip_code"):
-        missing.append("zip_code")
-    return missing
+    """
+    Return list of missing project basic fields.
+
+    Args:
+        state: Current project state
+
+    Returns:
+        List of missing field names. Returns empty list on error.
+    """
+    try:
+        if not state or not isinstance(state, dict):
+            logger.warning(f"[get_missing_basics] Invalid state: {type(state)}")
+            return ["project_title", "project_type", "zip_code"]  # Assume all missing
+
+        missing = []
+        if not state.get("project_title"):
+            missing.append("project_title")
+        if not state.get("project_type"):
+            missing.append("project_type")
+        if not state.get("zip_code"):
+            missing.append("zip_code")
+
+        return missing
+
+    except Exception as e:
+        logger.exception(f"[get_missing_basics] Unexpected error: {e}")
+        return []
 
 
 def merge_image_analyses_to_extracted(image_analyses: list[ImageAnalysis]) -> ExtractedData:
@@ -314,7 +336,14 @@ def merge_image_analyses_to_extracted(image_analyses: list[ImageAnalysis]) -> Ex
     Strategy:
     - Lists (materials, colors, fixtures, appliances): combine and deduplicate by name
     - Dicts (measurements, style, search_context): use first available or merge intelligently
+
+    Args:
+        image_analyses: List of per-image analysis results
+
+    Returns:
+        Merged ExtractedData dict. Returns empty structure on error.
     """
+    # Initialize empty merged structure
     merged: ExtractedData = {
         "materials": [],
         "measurements": {},
@@ -322,73 +351,154 @@ def merge_image_analyses_to_extracted(image_analyses: list[ImageAnalysis]) -> Ex
         "fixtures": [],
         "appliances": [],
         "style": {},
-        "search_context": {}  # Added for smart Tavily search
+        "search_context": {}
     }
-    
-    seen_materials = set()
-    seen_colors = set()
-    seen_fixtures = set()
-    seen_appliances = set()
-    
-    for img_data in image_analyses:
-        analysis = img_data.get("analysis", {})
-        
-        # Merge materials (dedupe by name)
-        for item in analysis.get("materials", []):
-            key = item.get("name", "").lower()
-            if key and key not in seen_materials:
-                seen_materials.add(key)
-                merged["materials"].append(item)
-        
-        # Merge colors (dedupe by element)
-        for item in analysis.get("colors", []):
-            key = item.get("element", "").lower()
-            if key and key not in seen_colors:
-                seen_colors.add(key)
-                merged["colors"].append(item)
-        
-        # Merge fixtures (dedupe by name)
-        for item in analysis.get("fixtures", []):
-            key = item.get("name", "").lower()
-            if key and key not in seen_fixtures:
-                seen_fixtures.add(key)
-                merged["fixtures"].append(item)
-        
-        # Merge appliances (dedupe by name)
-        for item in analysis.get("appliances", []):
-            key = item.get("name", "").lower()
-            if key and key not in seen_appliances:
-                seen_appliances.add(key)
-                merged["appliances"].append(item)
-        
-        # Measurements: use first available with actual values
-        if not merged["measurements"] and analysis.get("measurements"):
-            merged["measurements"] = analysis["measurements"]
-        
-        # Style: use first available
-        if not merged["style"] and analysis.get("style"):
-            merged["style"] = analysis["style"]
 
-        # Search context: use first available (for smart Tavily search)
-        if not merged["search_context"] and analysis.get("search_context"):
-            merged["search_context"] = analysis["search_context"]
+    try:
+        if not image_analyses:
+            logger.debug("[merge_image_analyses_to_extracted] Empty image_analyses")
+            return merged
 
-    return merged
+        if not isinstance(image_analyses, list):
+            logger.error(f"[merge_image_analyses_to_extracted] image_analyses is not a list: {type(image_analyses)}")
+            return merged
+
+        seen_materials = set()
+        seen_colors = set()
+        seen_fixtures = set()
+        seen_appliances = set()
+
+        for img_idx, img_data in enumerate(image_analyses):
+            try:
+                if not isinstance(img_data, dict):
+                    logger.warning(f"[merge_image_analyses_to_extracted] Image {img_idx} is not a dict: {type(img_data)}")
+                    continue
+
+                analysis = img_data.get("analysis", {})
+                if not isinstance(analysis, dict):
+                    logger.warning(f"[merge_image_analyses_to_extracted] Image {img_idx} analysis is not a dict: {type(analysis)}")
+                    continue
+
+                # Merge materials (dedupe by name)
+                try:
+                    for item in analysis.get("materials", []):
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("name", "")).lower()
+                        if key and key not in seen_materials:
+                            seen_materials.add(key)
+                            merged["materials"].append(item)
+                except Exception as e:
+                    logger.warning(f"[merge_image_analyses_to_extracted] Error merging materials: {e}")
+
+                # Merge colors (dedupe by element)
+                try:
+                    for item in analysis.get("colors", []):
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("element", "")).lower()
+                        if key and key not in seen_colors:
+                            seen_colors.add(key)
+                            merged["colors"].append(item)
+                except Exception as e:
+                    logger.warning(f"[merge_image_analyses_to_extracted] Error merging colors: {e}")
+
+                # Merge fixtures (dedupe by name)
+                try:
+                    for item in analysis.get("fixtures", []):
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("name", "")).lower()
+                        if key and key not in seen_fixtures:
+                            seen_fixtures.add(key)
+                            merged["fixtures"].append(item)
+                except Exception as e:
+                    logger.warning(f"[merge_image_analyses_to_extracted] Error merging fixtures: {e}")
+
+                # Merge appliances (dedupe by name)
+                try:
+                    for item in analysis.get("appliances", []):
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("name", "")).lower()
+                        if key and key not in seen_appliances:
+                            seen_appliances.add(key)
+                            merged["appliances"].append(item)
+                except Exception as e:
+                    logger.warning(f"[merge_image_analyses_to_extracted] Error merging appliances: {e}")
+
+                # Measurements: use first available with actual values
+                try:
+                    if not merged["measurements"] and analysis.get("measurements"):
+                        if isinstance(analysis["measurements"], dict):
+                            merged["measurements"] = analysis["measurements"]
+                except Exception as e:
+                    logger.warning(f"[merge_image_analyses_to_extracted] Error merging measurements: {e}")
+
+                # Style: use first available
+                try:
+                    if not merged["style"] and analysis.get("style"):
+                        if isinstance(analysis["style"], dict):
+                            merged["style"] = analysis["style"]
+                except Exception as e:
+                    logger.warning(f"[merge_image_analyses_to_extracted] Error merging style: {e}")
+
+                # Search context: use first available (for smart Tavily search)
+                try:
+                    if not merged["search_context"] and analysis.get("search_context"):
+                        if isinstance(analysis["search_context"], dict):
+                            merged["search_context"] = analysis["search_context"]
+                except Exception as e:
+                    logger.warning(f"[merge_image_analyses_to_extracted] Error merging search_context: {e}")
+
+            except Exception as e:
+                logger.warning(f"[merge_image_analyses_to_extracted] Error processing image {img_idx}: {e}")
+                continue
+
+        logger.debug(f"[merge_image_analyses_to_extracted] Merged {len(merged['materials'])} materials, "
+                    f"{len(merged['colors'])} colors, {len(merged['fixtures'])} fixtures, "
+                    f"{len(merged['appliances'])} appliances")
+        return merged
+
+    except Exception as e:
+        logger.exception(f"[merge_image_analyses_to_extracted] Unexpected error: {e}")
+        return merged
 
 
 def get_next_stage(current: Stage) -> Stage:
-    """Get the next stage in sequence."""
-    sequence: list[Stage] = [
-        "project_basics",
-        "image_analysis_generation",
-        "final_review",
-        "cost_estimation",
-        "completed"
-    ]
+    """
+    Get the next stage in sequence.
+
+    Args:
+        current: Current stage
+
+    Returns:
+        Next stage in sequence. Returns "project_basics" if current is invalid.
+    """
     try:
-        idx = sequence.index(current)
-        return sequence[idx + 1] if idx + 1 < len(sequence) else "completed"
-    except ValueError:
+        sequence: list[Stage] = [
+            "project_basics",
+            "image_analysis_generation",
+            "final_review",
+            "cost_estimation",
+            "completed"
+        ]
+
+        if not current:
+            logger.warning("[get_next_stage] Current stage is empty")
+            return "project_basics"
+
+        try:
+            idx = sequence.index(current)
+            next_stage = sequence[idx + 1] if idx + 1 < len(sequence) else "completed"
+            logger.debug(f"[get_next_stage] {current} -> {next_stage}")
+            return next_stage
+        except ValueError:
+            logger.warning(f"[get_next_stage] Invalid current stage: {current}, defaulting to project_basics")
+            return "project_basics"
+
+    except Exception as e:
+        logger.exception(f"[get_next_stage] Unexpected error: {e}")
         return "project_basics"
 
 
@@ -420,47 +530,89 @@ def get_thinking_status(state: ProjectState) -> str:
     """
     Get user-friendly thinking status based on current stage and sub-state.
 
+    Args:
+        state: Current project state
+
     Returns:
         Friendly status text for the thinking animation.
+        Returns "Processing..." on error.
     """
-    current_stage = state.get("current_stage", "project_basics")
+    try:
+        if not state or not isinstance(state, dict):
+            logger.warning(f"[get_thinking_status] Invalid state: {type(state)}")
+            return "Processing..."
 
-    # For image_analysis_generation, use sub-state for more granular status
-    if current_stage == "image_analysis_generation":
-        sub_state = state.get("image_sub_state", "analyzing")
-        return THINKING_STATUS_MAP.get(sub_state, "Processing...")
+        current_stage = state.get("current_stage", "project_basics")
 
-    return THINKING_STATUS_MAP.get(current_stage, "Processing...")
+        # For image_analysis_generation, use sub-state for more granular status
+        if current_stage == "image_analysis_generation":
+            sub_state = state.get("image_sub_state", "analyzing")
+            status = THINKING_STATUS_MAP.get(sub_state, "Processing...")
+            logger.debug(f"[get_thinking_status] Stage: {current_stage}, Sub-state: {sub_state} -> {status}")
+            return status
+
+        status = THINKING_STATUS_MAP.get(current_stage, "Processing...")
+        logger.debug(f"[get_thinking_status] Stage: {current_stage} -> {status}")
+        return status
+
+    except Exception as e:
+        logger.exception(f"[get_thinking_status] Unexpected error: {e}")
+        return "Processing..."
 
 
 def get_stage_progress(state: ProjectState) -> dict:
     """
     Get stage progress information for frontend progress bar.
 
+    Args:
+        state: Current project state
+
     Returns:
         dict with stage_number (1-4), stage_name, total_stages, and sub_state info
+        Returns default values on error.
     """
-    stage_map = {
-        "project_basics": {"number": 1, "name": "Project Basics"},
-        "image_analysis_generation": {"number": 2, "name": "Analysis & Generation"},
-        "final_review": {"number": 3, "name": "Review"},
-        "cost_estimation": {"number": 4, "name": "Estimation"},
-        "completed": {"number": 4, "name": "Completed"},
-    }
+    try:
+        stage_map = {
+            "project_basics": {"number": 1, "name": "Project Basics"},
+            "image_analysis_generation": {"number": 2, "name": "Analysis & Generation"},
+            "final_review": {"number": 3, "name": "Review"},
+            "cost_estimation": {"number": 4, "name": "Estimation"},
+            "completed": {"number": 4, "name": "Completed"},
+        }
 
-    current_stage = state.get("current_stage", "project_basics")
-    info = stage_map.get(current_stage, {"number": 1, "name": "Project Basics"})
+        if not state or not isinstance(state, dict):
+            logger.warning(f"[get_stage_progress] Invalid state: {type(state)}")
+            return {
+                "stage_number": 1,
+                "stage_name": "Project Basics",
+                "total_stages": 4,
+            }
 
-    result = {
-        "stage_number": info["number"],
-        "stage_name": info["name"],
-        "total_stages": 4,
-    }
+        current_stage = state.get("current_stage", "project_basics")
+        info = stage_map.get(current_stage, {"number": 1, "name": "Project Basics"})
 
-    # Add sub-state info for image_analysis_generation
-    if current_stage == "image_analysis_generation":
-        sub_state = state.get("image_sub_state", "analyzing")
-        result["sub_state"] = sub_state
-        result["is_generating"] = sub_state in ["generating", "generating_parallel"]
+        result = {
+            "stage_number": info["number"],
+            "stage_name": info["name"],
+            "total_stages": 4,
+        }
 
-    return result
+        # Add sub-state info for image_analysis_generation
+        if current_stage == "image_analysis_generation":
+            try:
+                sub_state = state.get("image_sub_state", "analyzing")
+                result["sub_state"] = sub_state
+                result["is_generating"] = sub_state in ["generating", "generating_parallel"]
+            except Exception as e:
+                logger.warning(f"[get_stage_progress] Error adding sub-state info: {e}")
+
+        logger.debug(f"[get_stage_progress] Stage {result['stage_number']}: {result['stage_name']}")
+        return result
+
+    except Exception as e:
+        logger.exception(f"[get_stage_progress] Unexpected error: {e}")
+        return {
+            "stage_number": 1,
+            "stage_name": "Project Basics",
+            "total_stages": 4,
+        }

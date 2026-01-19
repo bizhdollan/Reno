@@ -252,6 +252,7 @@ class LLMProvider:
         max_tokens: int = 1000,
         operation_type: Optional[str] = None,
         project_id: Optional[str] = None,
+        max_retries: int = 3,
         **kwargs: Any
     ) -> str:
         """
@@ -263,11 +264,13 @@ class LLMProvider:
             max_tokens: Maximum tokens in response
             operation_type: Optional label for cost tracking (e.g., "analysis", "generation")
             project_id: Optional project UUID for cost tracking
+            max_retries: Maximum number of retry attempts on failure (default: 3)
             **kwargs: Additional LiteLLM parameters
 
         Returns:
             The completion text
         """
+        import asyncio
         self._validate_messages(messages)
 
         # Generate unique call ID for tracking
@@ -289,35 +292,70 @@ class LLMProvider:
         else:
             completion_kwargs["temperature"] = temperature
 
-        try:
-            response = await acompletion(**completion_kwargs)
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    wait_time = min(2 ** attempt, 8)  # Exponential backoff, max 8 seconds
+                    logger.info(f"[LLM] Retry attempt {attempt + 1}/{max_retries} after {wait_time}s delay")
+                    await asyncio.sleep(wait_time)
 
-            # Extract the completion text
-            content = response.choices[0].message.content
+                response = await acompletion(**completion_kwargs)
 
-            # Log token usage and cost if available
-            if hasattr(response, 'usage') and response.usage:
-                input_tokens = response.usage.prompt_tokens
-                output_tokens = response.usage.completion_tokens
-                cost_usd = self._calculate_cost(input_tokens, output_tokens)
+                # Extract the completion text
+                content = response.choices[0].message.content
 
-                logger.info(f"[LLM Usage] {self.model} | {operation_type or 'unknown'} | "
-                      f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
+                # Log token usage and cost if available
+                if hasattr(response, 'usage') and response.usage:
+                    input_tokens = response.usage.prompt_tokens
+                    output_tokens = response.usage.completion_tokens
+                    cost_usd = self._calculate_cost(input_tokens, output_tokens)
 
-                # Log to database (async, non-blocking)
-                await self._log_cost(
-                    api_call_id=api_call_id,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                    operation_type=operation_type,
-                    project_id=project_id
-                )
+                    logger.info(f"[LLM Usage] {self.model} | {operation_type or 'unknown'} | "
+                          f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
 
-            return content
+                    # Log to database (async, non-blocking)
+                    await self._log_cost(
+                        api_call_id=api_call_id,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=cost_usd,
+                        operation_type=operation_type,
+                        project_id=project_id
+                    )
 
-        except Exception as e:
-            raise LLMProviderError(f"LLM completion failed: {str(e)}") from e
+                # Success!
+                if attempt > 0:
+                    logger.info(f"[LLM] Completion successful on attempt {attempt + 1}")
+                return content
+
+            except Exception as e:
+                last_exception = e
+                error_msg = str(e)
+
+                # Check if this is a rate limit error
+                is_rate_limit = any(keyword in error_msg.lower() for keyword in ['rate limit', 'quota', 'too many requests', '429'])
+
+                if is_rate_limit:
+                    logger.warning(f"[LLM] Rate limit detected on attempt {attempt + 1}/{max_retries}: {error_msg}")
+                else:
+                    logger.warning(f"[LLM] Completion failed on attempt {attempt + 1}/{max_retries}: {error_msg}")
+
+                # If this was the last attempt, raise after the loop
+                if attempt == max_retries - 1:
+                    break
+
+        # All retries exhausted
+        if last_exception:
+            error_msg = str(last_exception)
+            if any(keyword in error_msg.lower() for keyword in ['rate limit', 'quota', 'too many requests', '429']):
+                raise LLMProviderError(
+                    f"LLM rate limit exceeded. Please wait a moment and try again. (Attempted {max_retries} times)"
+                ) from last_exception
+            else:
+                raise LLMProviderError(f"LLM completion failed after {max_retries} attempts: {error_msg}") from last_exception
+        else:
+            raise LLMProviderError("LLM completion failed for unknown reason")
     
     async def complete_stream(
         self,
@@ -447,6 +485,7 @@ class LLMProvider:
         max_tokens: int = 1024,
         operation_type: Optional[str] = None,
         project_id: Optional[str] = None,
+        max_retries: int = 3,
         **kwargs: Any
     ) -> dict:
         """
@@ -460,6 +499,7 @@ class LLMProvider:
             max_tokens: Maximum tokens in response
             operation_type: Optional label for cost tracking
             project_id: Optional project UUID for cost tracking
+            max_retries: Maximum number of retry attempts on failure (default: 3)
             **kwargs: Additional parameters
 
         Returns:
@@ -469,120 +509,160 @@ class LLMProvider:
                 - data_url: str (full data URL with base64 encoding)
                 - description: str (text description of changes made)
         """
+        import asyncio
         self._validate_messages(messages)
 
         # Generate unique call ID for tracking
         api_call_id = str(uuid4())
 
-        try:
-            response = await acompletion(
-                model=self.model,
-                messages=messages,
-                # Note: modalities param removed per test file
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=False,
-                **kwargs
-            )
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    wait_time = min(2 ** attempt, 10)  # Exponential backoff, max 10 seconds
+                    logger.info(f"[VGM] Retry attempt {attempt + 1}/{max_retries} after {wait_time}s delay")
+                    await asyncio.sleep(wait_time)
 
-            choice = response.choices[0]
-
-            # =====================================================================
-            # EXTRACT TEXT DESCRIPTION
-            # =====================================================================
-            description = ""
-            message_content = choice.message.content
-
-            if isinstance(message_content, str):
-                description = message_content
-            else:
-                # Content is a list of parts
-                for part in message_content:
-                    if hasattr(part, 'text') and part.text:
-                        description = part.text
-                        break
-
-            logger.debug(f"[VGM] Extracted description: {description[:100]}..." if len(description) > 100 else f"[VGM] Extracted description: {description}")
-
-            # =====================================================================
-            # EXTRACT IMAGE - Check multiple locations
-            # =====================================================================
-            image_data = None
-            mime_type = "image/png"
-            image_data_url = None
-
-            # Location 1: Native Gemini structure (most common)
-            if hasattr(response, '_hidden_params') and 'candidates' in response._hidden_params:
-                candidates = response._hidden_params['candidates']
-                for candidate in candidates:
-                    if 'content' in candidate and 'parts' in candidate['content']:
-                        for part in candidate['content']['parts']:
-                            # Check for inline_data (native Gemini format)
-                            if isinstance(part, dict) and 'inline_data' in part:
-                                import base64
-                                image_data = base64.b64decode(part['inline_data']['data'])
-                                mime_type = part['inline_data'].get('mime_type', 'image/png')
-                                logger.debug(f"[VGM] Found image in native Gemini structure (inline_data)")
-                                break
-                            # Check for object with inline_data attribute
-                            elif hasattr(part, 'inline_data') and part.inline_data:
-                                import base64
-                                image_data = base64.b64decode(part.inline_data.data)
-                                mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
-                                logger.debug(f"[VGM] Found image in native Gemini structure (inline_data attr)")
-                                break
-                        if image_data:
-                            break
-
-            # Location 2: LiteLLM images array
-            if not image_data and hasattr(choice.message, 'images') and choice.message.images:
-                image_data_url = choice.message.images[0]["image_url"]["url"]
-
-                # Parse the data URL
-                # Format: data:image/png;base64,<base64_string>
-                if image_data_url.startswith("data:"):
-                    header, base64_string = image_data_url.split(",", 1)
-                    mime_type = header.split(":")[1].split(";")[0]
-
-                    import base64
-                    image_data = base64.b64decode(base64_string)
-                    logger.debug(f"[VGM] Found image in LiteLLM structure")
-                else:
-                    raise LLMProviderError(f"Unexpected image URL format: {image_data_url[:50]}")
-
-            if not image_data:
-                raise LLMProviderError("No image found in response. Checked both native Gemini and LiteLLM structures.")
-
-            # Create data URL if not already present
-            if not image_data_url:
-                import base64
-                base64_string = base64.b64encode(image_data).decode('utf-8')
-                image_data_url = f"data:{mime_type};base64,{base64_string}"
-
-            # Log token usage and cost
-            if hasattr(response, 'usage') and response.usage:
-                input_tokens = response.usage.prompt_tokens
-                output_tokens = response.usage.completion_tokens
-                cost_usd = self._calculate_cost(input_tokens, output_tokens)
-
-                logger.info(f"[VGM Usage] {self.model} | {operation_type or 'image_generation'} | "
-                      f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
-
-                await self._log_cost(
-                    api_call_id=api_call_id,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                    operation_type=operation_type or "image_generation",
-                    project_id=project_id
+                response = await acompletion(
+                    model=self.model,
+                    messages=messages,
+                    # Note: modalities param removed per test file
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=False,
+                    **kwargs
                 )
 
-            return {
-                "image_data": image_data,
-                "mime_type": mime_type,
-                "data_url": image_data_url,
-                "description": description
-            }
+                choice = response.choices[0]
 
-        except Exception as e:
-            raise LLMProviderError(f"Image generation failed: {str(e)}") from e
+                # =====================================================================
+                # EXTRACT TEXT DESCRIPTION
+                # =====================================================================
+                description = ""
+                message_content = choice.message.content
+
+                if isinstance(message_content, str):
+                    description = message_content
+                else:
+                    # Content is a list of parts
+                    for part in message_content:
+                        if hasattr(part, 'text') and part.text:
+                            description = part.text
+                            break
+
+                logger.debug(f"[VGM] Extracted description: {description[:100]}..." if len(description) > 100 else f"[VGM] Extracted description: {description}")
+
+                # =====================================================================
+                # EXTRACT IMAGE - Check multiple locations
+                # =====================================================================
+                image_data = None
+                mime_type = "image/png"
+                image_data_url = None
+
+                # Location 1: Native Gemini structure (most common)
+                if hasattr(response, '_hidden_params') and 'candidates' in response._hidden_params:
+                    candidates = response._hidden_params['candidates']
+                    for candidate in candidates:
+                        if 'content' in candidate and 'parts' in candidate['content']:
+                            for part in candidate['content']['parts']:
+                                # Check for inline_data (native Gemini format)
+                                if isinstance(part, dict) and 'inline_data' in part:
+                                    import base64
+                                    image_data = base64.b64decode(part['inline_data']['data'])
+                                    mime_type = part['inline_data'].get('mime_type', 'image/png')
+                                    logger.debug(f"[VGM] Found image in native Gemini structure (inline_data)")
+                                    break
+                                # Check for object with inline_data attribute
+                                elif hasattr(part, 'inline_data') and part.inline_data:
+                                    import base64
+                                    image_data = base64.b64decode(part.inline_data.data)
+                                    mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
+                                    logger.debug(f"[VGM] Found image in native Gemini structure (inline_data attr)")
+                                    break
+                            if image_data:
+                                break
+
+                # Location 2: LiteLLM images array
+                if not image_data and hasattr(choice.message, 'images') and choice.message.images:
+                    image_data_url = choice.message.images[0]["image_url"]["url"]
+
+                    # Parse the data URL
+                    # Format: data:image/png;base64,<base64_string>
+                    if image_data_url.startswith("data:"):
+                        header, base64_string = image_data_url.split(",", 1)
+                        mime_type = header.split(":")[1].split(";")[0]
+
+                        import base64
+                        image_data = base64.b64decode(base64_string)
+                        logger.debug(f"[VGM] Found image in LiteLLM structure")
+                    else:
+                        raise LLMProviderError(f"Unexpected image URL format: {image_data_url[:50]}")
+
+                if not image_data:
+                    # Log response structure for debugging on first failure
+                    if attempt == 0:
+                        logger.warning(f"[VGM] No image found. Response structure: hasattr(_hidden_params)={hasattr(response, '_hidden_params')}, "
+                                     f"hasattr(choice.message.images)={hasattr(choice.message, 'images')}")
+                    raise LLMProviderError("No image found in response. Checked both native Gemini and LiteLLM structures.")
+
+                # Create data URL if not already present
+                if not image_data_url:
+                    import base64
+                    base64_string = base64.b64encode(image_data).decode('utf-8')
+                    image_data_url = f"data:{mime_type};base64,{base64_string}"
+
+                # Log token usage and cost
+                if hasattr(response, 'usage') and response.usage:
+                    input_tokens = response.usage.prompt_tokens
+                    output_tokens = response.usage.completion_tokens
+                    cost_usd = self._calculate_cost(input_tokens, output_tokens)
+
+                    logger.info(f"[VGM Usage] {self.model} | {operation_type or 'image_generation'} | "
+                          f"tokens: {input_tokens}+{output_tokens} | cost: ${cost_usd:.6f}")
+
+                    await self._log_cost(
+                        api_call_id=api_call_id,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=cost_usd,
+                        operation_type=operation_type or "image_generation",
+                        project_id=project_id
+                    )
+
+                # Success! Return the result
+                logger.info(f"[VGM] Image generation successful on attempt {attempt + 1}")
+                return {
+                    "image_data": image_data,
+                    "mime_type": mime_type,
+                    "data_url": image_data_url,
+                    "description": description
+                }
+
+            except Exception as e:
+                last_exception = e
+                error_msg = str(e)
+
+                # Check if this is a rate limit error
+                is_rate_limit = any(keyword in error_msg.lower() for keyword in ['rate limit', 'quota', 'too many requests', '429'])
+
+                if is_rate_limit:
+                    logger.warning(f"[VGM] Rate limit detected on attempt {attempt + 1}/{max_retries}: {error_msg}")
+                else:
+                    logger.warning(f"[VGM] Image generation failed on attempt {attempt + 1}/{max_retries}: {error_msg}")
+
+                # If this was the last attempt, we'll raise the exception after the loop
+                if attempt == max_retries - 1:
+                    break
+
+        # All retries exhausted
+        if last_exception:
+            error_msg = str(last_exception)
+            if any(keyword in error_msg.lower() for keyword in ['rate limit', 'quota', 'too many requests', '429']):
+                raise LLMProviderError(
+                    f"Image generation rate limit exceeded. Please wait a few moments and try again. "
+                    f"(Attempted {max_retries} times)"
+                ) from last_exception
+            else:
+                raise LLMProviderError(f"Image generation failed after {max_retries} attempts: {error_msg}") from last_exception
+        else:
+            raise LLMProviderError("Image generation failed for unknown reason")

@@ -6,6 +6,10 @@ Flexible configuration for:
 - How to collect user's renovation vision
 """
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 # =============================================================================
 # EXTRACTION CATEGORIES
 # =============================================================================
@@ -83,60 +87,163 @@ EXTRACTION_CATEGORIES = [
 
 
 def get_category_keys() -> list[str]:
-    """Get list of all category keys."""
-    return [cat["key"] for cat in EXTRACTION_CATEGORIES]
+    """
+    Get list of all category keys.
+
+    Returns:
+        List of category key strings. Returns empty list on error.
+    """
+    try:
+        keys = [cat["key"] for cat in EXTRACTION_CATEGORIES]
+        return keys
+    except Exception as e:
+        logger.exception(f"[get_category_keys] Error extracting category keys: {e}")
+        return []
 
 
 def get_category_by_key(key: str) -> dict | None:
-    """Get category config by key."""
-    for cat in EXTRACTION_CATEGORIES:
-        if cat["key"] == key:
-            return cat
-    return None
+    """
+    Get category config by key.
+
+    Args:
+        key: Category key to look up
+
+    Returns:
+        Category dict or None if not found or on error
+    """
+    try:
+        if not key or not isinstance(key, str):
+            logger.warning(f"[get_category_by_key] Invalid key: {key}")
+            return None
+
+        for cat in EXTRACTION_CATEGORIES:
+            if not isinstance(cat, dict):
+                logger.warning(f"[get_category_by_key] Invalid category entry: {type(cat)}")
+                continue
+            if cat.get("key") == key:
+                logger.debug(f"[get_category_by_key] Found category: {key}")
+                return cat
+
+        logger.debug(f"[get_category_by_key] Category not found: {key}")
+        return None
+
+    except Exception as e:
+        logger.exception(f"[get_category_by_key] Unexpected error: {e}")
+        return None
 
 
 def build_extraction_prompt_section() -> str:
     """
     Build the extraction instructions section for the image analysis prompt.
     Automatically adapts to configured categories.
+
+    Returns:
+        Formatted prompt section string. Returns error message on failure.
     """
-    lines = []
-    for i, cat in enumerate(EXTRACTION_CATEGORIES, 1):
-        fields_str = ", ".join(cat["extract_fields"])
-        lines.append(
-            f"{i}. **{cat['label']}**: {cat['description']}\n"
-            f"   - Examples: {cat['examples']}\n"
-            f"   - Extract: {fields_str}"
-        )
-    return "\n\n".join(lines)
+    try:
+        lines = []
+        for i, cat in enumerate(EXTRACTION_CATEGORIES, 1):
+            try:
+                if not isinstance(cat, dict):
+                    logger.warning(f"[build_extraction_prompt_section] Invalid category {i}: {type(cat)}")
+                    continue
+
+                label = cat.get("label", "Unknown")
+                description = cat.get("description", "")
+                examples = cat.get("examples", "")
+                extract_fields = cat.get("extract_fields", [])
+
+                if not isinstance(extract_fields, list):
+                    logger.warning(f"[build_extraction_prompt_section] Invalid extract_fields for {label}")
+                    extract_fields = []
+
+                fields_str = ", ".join(str(f) for f in extract_fields)
+
+                lines.append(
+                    f"{i}. **{label}**: {description}\n"
+                    f"   - Examples: {examples}\n"
+                    f"   - Extract: {fields_str}"
+                )
+
+            except Exception as e:
+                logger.warning(f"[build_extraction_prompt_section] Error processing category {i}: {e}")
+                continue
+
+        if not lines:
+            logger.error("[build_extraction_prompt_section] No valid categories found")
+            return "Error: No extraction categories configured"
+
+        result = "\n\n".join(lines)
+        logger.debug(f"[build_extraction_prompt_section] Built prompt with {len(lines)} categories")
+        return result
+
+    except Exception as e:
+        logger.exception(f"[build_extraction_prompt_section] Unexpected error: {e}")
+        return "Error: Failed to build extraction prompt section"
 
 
 def build_extraction_json_schema() -> str:
     """
     Build the expected JSON schema section for the prompt.
-    """
-    schema_parts = []
-    for cat in EXTRACTION_CATEGORIES:
-        key = cat["key"]
-        if key == "measurements":
-            # Measurements is a dict, not a list
-            schema_parts.append(f'    "{key}": {{\n        "room_width_ft": 12,\n        "room_length_ft": 10,\n        "room_height_ft": 9,\n        "area_sqft": 120,\n        "notes": "estimated from image"\n    }}')
-        elif key == "style":
-            # Style is also a dict
-            schema_parts.append(f'    "{key}": {{\n        "overall_style": "modern",\n        "condition": "good",\n        "age_estimate": "5-10 years"\n    }}')
-        elif key == "search_context":
-            # Search context is a dict with mixed types
-            schema_parts.append(f'    "{key}": {{\n        "detected_era": "1970s",\n        "style_assessment": "dated traditional",\n        "problem_areas": ["dated countertops", "poor lighting"],\n        "renovation_scope": "moderate",\n        "material_age_indicators": ["laminate counters", "vinyl flooring"]\n    }}')
-        elif key == "features_to_retain":
-            # Features to retain is a dict with lists
-            schema_parts.append(f'    "{key}": {{\n        "must_retain": ["2 windows on east wall", "entry door"],\n        "character_features": ["high ceilings", "crown molding"],\n        "practical_constraints": ["radiator placement"]\n    }}')
-        else:
-            # Others are lists
-            fields = cat["extract_fields"]
-            example_obj = ", ".join([f'"{f}": "..."' for f in fields])
-            schema_parts.append(f'    "{key}": [\n        {{{example_obj}}}\n    ]')
 
-    return "{\n" + ",\n".join(schema_parts) + "\n}"
+    Returns:
+        JSON schema string. Returns minimal schema on error.
+    """
+    try:
+        schema_parts = []
+
+        for cat in EXTRACTION_CATEGORIES:
+            try:
+                if not isinstance(cat, dict):
+                    logger.warning(f"[build_extraction_json_schema] Invalid category: {type(cat)}")
+                    continue
+
+                key = cat.get("key")
+                if not key:
+                    logger.warning("[build_extraction_json_schema] Category missing key")
+                    continue
+
+                if key == "measurements":
+                    # Measurements is a dict, not a list
+                    schema_parts.append(f'    "{key}": {{\n        "room_width_ft": 12,\n        "room_length_ft": 10,\n        "room_height_ft": 9,\n        "area_sqft": 120,\n        "notes": "estimated from image"\n    }}')
+
+                elif key == "style":
+                    # Style is also a dict
+                    schema_parts.append(f'    "{key}": {{\n        "overall_style": "modern",\n        "condition": "good",\n        "age_estimate": "5-10 years"\n    }}')
+
+                elif key == "search_context":
+                    # Search context is a dict with mixed types
+                    schema_parts.append(f'    "{key}": {{\n        "detected_era": "1970s",\n        "style_assessment": "dated traditional",\n        "problem_areas": ["dated countertops", "poor lighting"],\n        "renovation_scope": "moderate",\n        "material_age_indicators": ["laminate counters", "vinyl flooring"]\n    }}')
+
+                elif key == "features_to_retain":
+                    # Features to retain is a dict with lists
+                    schema_parts.append(f'    "{key}": {{\n        "must_retain": ["2 windows on east wall", "entry door"],\n        "character_features": ["high ceilings", "crown molding"],\n        "practical_constraints": ["radiator placement"]\n    }}')
+
+                else:
+                    # Others are lists
+                    fields = cat.get("extract_fields", [])
+                    if not isinstance(fields, list):
+                        logger.warning(f"[build_extraction_json_schema] Invalid extract_fields for {key}")
+                        fields = []
+
+                    example_obj = ", ".join([f'"{f}": "..."' for f in fields])
+                    schema_parts.append(f'    "{key}": [\n        {{{example_obj}}}\n    ]')
+
+            except Exception as e:
+                logger.warning(f"[build_extraction_json_schema] Error processing category: {e}")
+                continue
+
+        if not schema_parts:
+            logger.error("[build_extraction_json_schema] No valid schema parts generated")
+            return "{}"
+
+        result = "{\n" + ",\n".join(schema_parts) + "\n}"
+        logger.debug(f"[build_extraction_json_schema] Built schema with {len(schema_parts)} parts")
+        return result
+
+    except Exception as e:
+        logger.exception(f"[build_extraction_json_schema] Unexpected error: {e}")
+        return "{}"
 
 
 # =============================================================================

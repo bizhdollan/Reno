@@ -4,7 +4,7 @@ from enum import Enum
 from datetime import datetime, timedelta
 
 from src.core.logger import get_logger
-from src.core.llm.provider import LLMProvider
+from src.core.llm.provider import LLMProvider, LLMProviderError
 
 logger = get_logger(__name__)
 from src.core.langgraph.state import (
@@ -90,14 +90,21 @@ async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_
         Inspirations dict if available, None otherwise
     """
     if not project_id_token:
+        logger.warning("[inspirations] No project_id_token provided")
         return None
 
-    db = SessionLocal()
-    start_time = asyncio.get_event_loop().time()
-
+    db = None
     try:
+        db = SessionLocal()
+        start_time = asyncio.get_event_loop().time()
+
         # Get project
-        project = db.query(Project).filter(Project.token == project_id_token).first()
+        try:
+            project = db.query(Project).filter(Project.token == project_id_token).first()
+        except Exception as db_error:
+            logger.error(f"[inspirations] Database query failed for project {project_id_token}: {db_error}", exc_info=True)
+            return None
+
         if not project:
             logger.info(f"[inspirations] Project not found: {project_id_token}")
             return None
@@ -114,11 +121,22 @@ async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_
         # Wait with retries
         elapsed = 0
         while elapsed < max_wait_seconds:
-            await asyncio.sleep(INSPIRATION_RETRY_INTERVAL)
+            try:
+                await asyncio.sleep(INSPIRATION_RETRY_INTERVAL)
+            except asyncio.CancelledError:
+                logger.warning("[inspirations] Wait cancelled by asyncio")
+                return None
+
             elapsed = asyncio.get_event_loop().time() - start_time
 
             # Refresh and check again
-            db.refresh(project)
+            try:
+                db.refresh(project)
+            except Exception as refresh_error:
+                logger.error(f"[inspirations] Failed to refresh project from database: {refresh_error}")
+                # Continue waiting, next iteration might succeed
+                continue
+
             if project.renovation_inspirations:
                 # Check if Tavily search completed (no pending flag)
                 if not project.renovation_inspirations.get("_tavily_pending"):
@@ -138,10 +156,14 @@ async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_
         return None
 
     except Exception as e:
-        logger.info(f"[inspirations] Error retrieving inspirations: {e}")
+        logger.error(f"[inspirations] Unexpected error retrieving inspirations: {e}", exc_info=True)
         return None
     finally:
-        db.close()
+        if db:
+            try:
+                db.close()
+            except Exception as close_error:
+                logger.error(f"[inspirations] Error closing database session: {close_error}")
 
 
 async def image_analysis_generation_node(state: ProjectState) -> dict:
@@ -258,20 +280,38 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
 
             # Emit analysis_start event for SSE streaming
             if project_id_for_events:
-                from src.core.services.event_broadcaster import emit_analysis_start
-                await emit_analysis_start(project_id_for_events, len(new_image_urls))
+                try:
+                    from src.core.services.event_broadcaster import emit_analysis_start
+                    await emit_analysis_start(project_id_for_events, len(new_image_urls))
+                except Exception as event_error:
+                    logger.error(f"[image_analysis] Failed to emit analysis_start event: {event_error}")
+                    # Continue processing - event emission failure shouldn't block analysis
 
             # Analyze all images in parallel (with progress events)
-            image_analyses = await analyze_images_parallel(
-                image_urls=new_image_urls,
-                project_type=project_type,
-                project_id=project_id_for_events
-            )
-            updates["image_analyses"] = image_analyses
+            try:
+                image_analyses = await analyze_images_parallel(
+                    image_urls=new_image_urls,
+                    project_type=project_type,
+                    project_id=project_id_for_events
+                )
+                updates["image_analyses"] = image_analyses
+            except Exception as analysis_error:
+                logger.error(f"[image_analysis] Image analysis failed: {analysis_error}", exc_info=True)
+                updates["messages"] = [{"role": "assistant", "content": "I encountered an error analyzing your images. Please try uploading them again or contact support if the issue persists."}]
+                updates["awaiting_user_input"] = True
+                if services:
+                    services.cleanup()
+                return updates
 
             # Merge into extracted_data (kept internally, not shown to user)
-            extracted_data = merge_image_analyses_to_extracted(image_analyses)
-            updates["extracted_data"] = extracted_data
+            try:
+                extracted_data = merge_image_analyses_to_extracted(image_analyses)
+                updates["extracted_data"] = extracted_data
+            except Exception as merge_error:
+                logger.error(f"[image_analysis] Failed to merge image analyses: {merge_error}", exc_info=True)
+                # Continue with empty extracted_data rather than failing
+                extracted_data = {}
+                updates["extracted_data"] = extracted_data
 
             # Detect features to retain (parallel with summary generation)
             primary_image_url = new_image_urls[0]
@@ -280,7 +320,13 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
             features_task = detect_features_to_retain(primary_image_url)
             summary_task = generate_brief_room_summary(primary_image_url, project_type, extracted_data)
 
-            features_result, summary_result = await asyncio.gather(features_task, summary_task)
+            try:
+                features_result, summary_result = await asyncio.gather(features_task, summary_task)
+            except Exception as gather_error:
+                logger.error(f"[image_analysis] Failed to gather features/summary: {gather_error}", exc_info=True)
+                # Provide default values to continue gracefully
+                features_result = {"must_retain": [], "visible_elements": {}, "image_scope": {"frame_type": "full_room", "room_coverage_pct": 100}, "must_not_add": []}
+                summary_result = {"brief_summary": f"A {project_type} space.", "room_vibe": "current"}
 
             # Store features to retain for later image generation
             # NEW: Also extract visible_elements, image_scope, and must_not_add for hallucination prevention
@@ -329,19 +375,24 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
 
             # Emit analysis_complete event for SSE streaming
             if project_id_for_events:
-                from src.core.services.event_broadcaster import emit_analysis_complete
-                # Get categories found from analysis
-                categories_found = list(extracted_data.keys()) if extracted_data else []
-                search_insights_dict = None
-                if extracted_data.get("search_context"):
-                    search_insights_dict = extracted_data["search_context"]
-                await emit_analysis_complete(project_id_for_events, categories_found, search_insights_dict)
+                try:
+                    from src.core.services.event_broadcaster import emit_analysis_complete
+                    # Get categories found from analysis
+                    categories_found = list(extracted_data.keys()) if extracted_data else []
+                    search_insights_dict = None
+                    if extracted_data.get("search_context"):
+                        search_insights_dict = extracted_data["search_context"]
+                    await emit_analysis_complete(project_id_for_events, categories_found, search_insights_dict)
+                except Exception as event_error:
+                    logger.error(f"[image_analysis] Failed to emit analysis_complete event: {event_error}")
+                    # Continue - event emission failure shouldn't block the workflow
 
             # NEW: Trigger smart Tavily search with image insights
             # This replaces the generic search that ran on zip code entry
             zip_code = state.get("zip_code")
             project_id_token = state.get("project_id")
             if zip_code and project_id_token:
+                db = None
                 try:
                     # Extract search insights from image analysis
                     search_insights = extract_search_insights(extracted_data)
@@ -363,57 +414,95 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                             project = db.query(Project).filter(Project.token == project_id_token).first()
                             if project:
                                 # Start smart search in background with image-derived insights
-                                start_smart_search_background(
-                                    project_id=project.id,
-                                    project_type=project_type,
-                                    zip_code=zip_code,
-                                    search_insights=search_insights
-                                )
-                                logger.info(f"[image_analysis] 🚀 Started smart Tavily search for {project_type} in {zip_code}")
+                                try:
+                                    start_smart_search_background(
+                                        project_id=project.id,
+                                        project_type=project_type,
+                                        zip_code=zip_code,
+                                        search_insights=search_insights
+                                    )
+                                    logger.info(f"[image_analysis] 🚀 Started smart Tavily search for {project_type} in {zip_code}")
+                                except Exception as search_error:
+                                    logger.error(f"[image_analysis] Failed to start smart search: {search_error}", exc_info=True)
+                                    # Emit context_ready so frontend isn't blocked
+                                    try:
+                                        from src.core.services.event_broadcaster import emit_context_ready
+                                        asyncio.create_task(emit_context_ready(str(project.id)))
+                                    except Exception:
+                                        pass
                             else:
-                                logger.info(f"[image_analysis] ⚠️  Project not found for token {project_id_token}")
+                                logger.warning(f"[image_analysis] Project not found for token {project_id_token}")
                                 # Emit context_ready since no smart search will run
-                                from src.core.services.event_broadcaster import emit_context_ready
-                                asyncio.create_task(emit_context_ready(project_id_token))
+                                try:
+                                    from src.core.services.event_broadcaster import emit_context_ready
+                                    asyncio.create_task(emit_context_ready(project_id_token))
+                                except Exception:
+                                    pass
+                        except Exception as db_error:
+                            logger.error(f"[image_analysis] Database error during smart search setup: {db_error}", exc_info=True)
+                            # Continue - search is optional, don't block the flow
                         finally:
-                            db.close()
+                            if db:
+                                try:
+                                    db.close()
+                                except Exception:
+                                    pass
                     else:
-                        logger.info(f"[image_analysis] ⚠️  No useful search context extracted from images")
+                        logger.info(f"[image_analysis] No useful search context extracted from images")
                         # Emit context_ready since no smart search will run
-                        from src.core.services.event_broadcaster import emit_context_ready
                         db = SessionLocal()
                         try:
                             project = db.query(Project).filter(Project.token == project_id_token).first()
                             if project:
-                                asyncio.create_task(emit_context_ready(str(project.id)))
+                                try:
+                                    from src.core.services.event_broadcaster import emit_context_ready
+                                    asyncio.create_task(emit_context_ready(str(project.id)))
+                                except Exception:
+                                    pass
+                        except Exception as db_error:
+                            logger.error(f"[image_analysis] Database error emitting context_ready: {db_error}")
                         finally:
-                            db.close()
+                            if db:
+                                try:
+                                    db.close()
+                                except Exception:
+                                    pass
                 except Exception as e:
-                    logger.info(f"[image_analysis] ⚠️  Smart search trigger failed: {e}")
+                    logger.error(f"[image_analysis] Smart search trigger failed: {e}", exc_info=True)
                     # Emit context_ready on error so frontend isn't blocked
-                    from src.core.services.event_broadcaster import emit_context_ready
-                    db = SessionLocal()
+                    db = None
                     try:
+                        from src.core.services.event_broadcaster import emit_context_ready
+                        db = SessionLocal()
                         project = db.query(Project).filter(Project.token == project_id_token).first()
                         if project:
                             asyncio.create_task(emit_context_ready(str(project.id)))
-                    except Exception:
-                        pass
+                    except Exception as fallback_error:
+                        logger.error(f"[image_analysis] Failed to emit context_ready after search error: {fallback_error}")
                     finally:
-                        db.close()
+                        if db:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
             else:
                 # No zip_code or project_id_token available - emit context_ready anyway
                 if project_id_token:
-                    from src.core.services.event_broadcaster import emit_context_ready
-                    db = SessionLocal()
+                    db = None
                     try:
+                        from src.core.services.event_broadcaster import emit_context_ready
+                        db = SessionLocal()
                         project = db.query(Project).filter(Project.token == project_id_token).first()
                         if project:
                             asyncio.create_task(emit_context_ready(str(project.id)))
-                    except Exception:
-                        pass
+                    except Exception as context_error:
+                        logger.error(f"[image_analysis] Failed to emit context_ready: {context_error}")
                     finally:
-                        db.close()
+                        if db:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
 
             # Initialize empty image history
             updates["generated_image_history"] = []
@@ -582,15 +671,28 @@ async def _handle_design_conversation(
             f"Extracted data includes: {list(extracted_data.keys())}. "
             f"User can: confirm extraction, correct data, provide vision, ask suggestions, ask questions, skip steps."
         )
-        unified_result = await unified_classify(
-            user_message=user_message,
-            context=context,
-            has_generated_images=len(state.get("generated_image_history", [])) > 0
-        )
+        try:
+            unified_result = await unified_classify(
+                user_message=user_message,
+                context=context,
+                has_generated_images=len(state.get("generated_image_history", [])) > 0
+            )
 
-        primary_intent = unified_result.get("primary_intent", "unclear")
-        secondary_intents = unified_result.get("secondary_intents", [])
-        extracted_content = unified_result.get("extracted_content", {})
+            primary_intent = unified_result.get("primary_intent", "unclear")
+            secondary_intents = unified_result.get("secondary_intents", [])
+            extracted_content = unified_result.get("extracted_content", {})
+        except LLMProviderError as llm_error:
+            logger.error(f"[design_conversation] LLM provider error during intent classification: {llm_error}", exc_info=True)
+            # Fallback to safe default behavior
+            primary_intent = "unclear"
+            secondary_intents = []
+            extracted_content = {}
+        except Exception as classify_error:
+            logger.error(f"[design_conversation] Intent classification failed: {classify_error}", exc_info=True)
+            # Fallback to safe default
+            primary_intent = "unclear"
+            secondary_intents = []
+            extracted_content = {}
 
         # Cache expertise level if not already set
         if not state.get("expertise_level"):
@@ -667,32 +769,46 @@ async def _handle_design_conversation(
             else:
                 logger.info(f"[design_conversation] No inspirations available, generating generic suggestions")
 
-            suggestions_result = await generate_expert_suggestions(
-                project_type=project_type,
-                current_state_summary=current_state_summary,
-                user_preferences=user_prefs,
-                expertise_level=expertise_level,
-                inspirations=inspirations
-            )
+            try:
+                suggestions_result = await generate_expert_suggestions(
+                    project_type=project_type,
+                    current_state_summary=current_state_summary,
+                    user_preferences=user_prefs,
+                    expertise_level=expertise_level,
+                    inspirations=inspirations
+                )
 
-            suggestions_options = suggestions_result.get("options", [])
-            updates["pending_suggestions"] = suggestions_options
-            # Store all suggestions permanently so user can switch between options later
-            updates["all_suggestions"] = suggestions_options
+                suggestions_options = suggestions_result.get("options", [])
+                updates["pending_suggestions"] = suggestions_options
+                # Store all suggestions permanently so user can switch between options later
+                updates["all_suggestions"] = suggestions_options
 
-            # Return structured content for card rendering
-            response_content = [
-                {"type": "text", "text": "# Renovation Options\n\nBased on your space and local design trends, here are my recommendations:"},
-                _format_suggestions_as_cards(suggestions_result, inspirations),
-                {"type": "text", "text": "\n\nSelect an option to see it visualized, or tell me if you have a different idea in mind!"}
-            ]
-            updates["messages"] = [{"role": "assistant", "content": response_content}]
-            updates["awaiting_user_input"] = True
-            return updates
+                # Return structured content for card rendering
+                response_content = [
+                    {"type": "text", "text": "# Renovation Options\n\nBased on your space and local design trends, here are my recommendations:"},
+                    _format_suggestions_as_cards(suggestions_result, inspirations),
+                    {"type": "text", "text": "\n\nSelect an option to see it visualized, or tell me if you have a different idea in mind!"}
+                ]
+                updates["messages"] = [{"role": "assistant", "content": response_content}]
+                updates["awaiting_user_input"] = True
+                return updates
+            except LLMProviderError as llm_error:
+                logger.error(f"[design_conversation] LLM provider error generating suggestions: {llm_error}", exc_info=True)
+                response = "I'm having trouble generating suggestions right now. Could you tell me what style or changes you have in mind instead?"
+                updates["messages"] = [{"role": "assistant", "content": response}]
+                updates["awaiting_user_input"] = True
+                return updates
+            except Exception as suggestions_error:
+                logger.error(f"[design_conversation] Failed to generate suggestions: {suggestions_error}", exc_info=True)
+                response = "I encountered an error generating suggestions. Please describe the style or changes you'd like to see, and I'll help visualize it."
+                updates["messages"] = [{"role": "assistant", "content": response}]
+                updates["awaiting_user_input"] = True
+                return updates
 
         elif primary_intent == "ask_question":
-            provider = LLMProvider.for_llm()
-            answer_prompt = f"""Answer this renovation question helpfully.
+            try:
+                provider = LLMProvider.for_llm()
+                answer_prompt = f"""Answer this renovation question helpfully.
 Project type: {project_type}
 Current room: {json.dumps(extracted_data, indent=2)[:500] if extracted_data else 'Not analyzed yet'}
 User's question: {user_message}
@@ -700,16 +816,23 @@ User's question: {user_message}
 Provide a helpful, informative answer. Keep it concise but educational.
 At the end, gently guide them back to the renovation planning."""
 
-            answer = await provider.complete(
-                messages=[
-                    {"role": "system", "content": "You are a helpful renovation expert."},
-                    {"role": "user", "content": answer_prompt}
-                ],
-                temperature=0.5,
-                max_tokens=500
-            )
+                answer = await provider.complete(
+                    messages=[
+                        {"role": "system", "content": "You are a helpful renovation expert."},
+                        {"role": "user", "content": answer_prompt}
+                    ],
+                    temperature=0.5,
+                    max_tokens=500
+                )
 
-            response = f"{answer}\n\n---\n\nWould you like to continue with your renovation vision, or do you have more questions?"
+                response = f"{answer}\n\n---\n\nWould you like to continue with your renovation vision, or do you have more questions?"
+            except LLMProviderError as llm_error:
+                logger.error(f"[design_conversation] LLM provider error answering question: {llm_error}", exc_info=True)
+                response = "I'm having trouble processing your question right now. Could you rephrase it, or would you like to continue with your renovation planning?"
+            except Exception as answer_error:
+                logger.error(f"[design_conversation] Error answering question: {answer_error}", exc_info=True)
+                response = "I encountered an error answering your question. Let's continue with your renovation vision - what changes would you like to make?"
+
             updates["messages"] = [{"role": "assistant", "content": response}]
             updates["awaiting_user_input"] = True
             return updates
@@ -718,14 +841,22 @@ At the end, gently guide them back to the renovation planning."""
             vague_needs = extracted_content.get("vague_needs") or user_message
             extracted_summary = json.dumps(extracted_data, indent=2)[:500] if extracted_data else ""
 
-            clarification = await clarify_vague_request(
-                user_request=vague_needs,
-                project_type=project_type,
-                extracted_data_summary=extracted_summary,
-                expertise_level=expertise_level
-            )
+            try:
+                clarification = await clarify_vague_request(
+                    user_request=vague_needs,
+                    project_type=project_type,
+                    extracted_data_summary=extracted_summary,
+                    expertise_level=expertise_level
+                )
 
-            response = clarification.get("suggested_response", "Could you tell me more about what you'd like to change?")
+                response = clarification.get("suggested_response", "Could you tell me more about what you'd like to change?")
+            except LLMProviderError as llm_error:
+                logger.error(f"[design_conversation] LLM provider error during clarification: {llm_error}", exc_info=True)
+                response = "Could you tell me more specifically about what you'd like to change? For example, materials, colors, style, or layout?"
+            except Exception as clarify_error:
+                logger.error(f"[design_conversation] Failed to clarify vague request: {clarify_error}", exc_info=True)
+                response = "I'd love to help! Could you be more specific about what changes you're envisioning?"
+
             updates["messages"] = [{"role": "assistant", "content": response}]
             updates["awaiting_user_input"] = True
             return updates
@@ -859,6 +990,7 @@ async def _handle_generating(
     must_not_add = state.get("_must_not_add", [])
 
     if not original_image_urls:
+        logger.warning("[image_analysis] No original image URLs provided for generation")
         generated_url = get_placeholder_image_url()
         generation_prompt = ""
         description = ""
@@ -878,21 +1010,33 @@ async def _handle_generating(
                 image_scope=image_scope,
             )
 
-            image_history = add_to_image_history(
-                history=image_history,
-                url=generated_url,
-                description=description,
-                base_perspective=0,
-                user_satisfied=None
-            )
+            try:
+                image_history = add_to_image_history(
+                    history=image_history,
+                    url=generated_url,
+                    description=description,
+                    base_perspective=0,
+                    user_satisfied=None
+                )
+            except Exception as history_error:
+                logger.error(f"[image_analysis] Failed to add image to history: {history_error}")
+                # Continue with existing history - this is not critical
+
             generated_results = [{"url": generated_url, "description": description, "perspective": 0}]
-        except Exception as e:
-            logger.info(f"[image_analysis] Image generation failed: {e}")
+        except LLMProviderError as llm_error:
+            logger.error(f"[image_analysis] LLM provider error during image generation: {llm_error}", exc_info=True)
             generated_url = get_placeholder_image_url()
             generation_prompt = ""
             description = ""
             generated_results = []
-            updates["_generation_error"] = str(e)
+            updates["_generation_error"] = f"Image generation service error: {str(llm_error)}"
+        except Exception as e:
+            logger.error(f"[image_analysis] Image generation failed: {e}", exc_info=True)
+            generated_url = get_placeholder_image_url()
+            generation_prompt = ""
+            description = ""
+            generated_results = []
+            updates["_generation_error"] = f"Failed to generate image: {str(e)}"
     else:
         # Multiple perspectives - generate in parallel
         async def generate_for_perspective(img_url: str, perspective_idx: int):
@@ -910,22 +1054,35 @@ async def _handle_generating(
                     image_scope=image_scope,
                 )
                 return {"url": url, "prompt": prompt, "description": desc, "perspective": perspective_idx, "success": True}
+            except LLMProviderError as llm_error:
+                logger.error(f"[image_analysis] LLM provider error for perspective {perspective_idx}: {llm_error}", exc_info=True)
+                return {"url": get_placeholder_image_url(), "description": f"Image generation service error: {str(llm_error)}", "perspective": perspective_idx, "success": False}
             except Exception as e:
-                return {"url": get_placeholder_image_url(), "description": str(e), "perspective": perspective_idx, "success": False}
+                logger.error(f"[image_analysis] Generation failed for perspective {perspective_idx}: {e}", exc_info=True)
+                return {"url": get_placeholder_image_url(), "description": f"Failed to generate: {str(e)}", "perspective": perspective_idx, "success": False}
 
-        generated_results = await asyncio.gather(*[
-            generate_for_perspective(url, idx) for idx, url in enumerate(original_image_urls)
-        ])
+        try:
+            generated_results = await asyncio.gather(*[
+                generate_for_perspective(url, idx) for idx, url in enumerate(original_image_urls)
+            ])
+        except Exception as gather_error:
+            logger.error(f"[image_analysis] Error gathering parallel perspective generations: {gather_error}", exc_info=True)
+            generated_results = []
+            updates["_generation_error"] = f"Parallel generation failed: {str(gather_error)}"
 
         for result in generated_results:
             if result.get("success"):
-                image_history = add_to_image_history(
-                    history=image_history,
-                    url=result["url"],
-                    description=result.get("description", ""),
-                    base_perspective=result["perspective"],
-                    user_satisfied=None
-                )
+                try:
+                    image_history = add_to_image_history(
+                        history=image_history,
+                        url=result["url"],
+                        description=result.get("description", ""),
+                        base_perspective=result["perspective"],
+                        user_satisfied=None
+                    )
+                except Exception as history_error:
+                    logger.error(f"[image_analysis] Failed to add perspective {result['perspective']} to history: {history_error}")
+                    # Continue - history failure shouldn't stop the flow
 
         successful = [r for r in generated_results if r.get("success")]
         if successful:
@@ -933,10 +1090,11 @@ async def _handle_generating(
             generation_prompt = successful[0].get("prompt", "")
             description = successful[0].get("description", "")
         else:
+            logger.error("[image_analysis] All perspective generations failed")
             generated_url = get_placeholder_image_url()
             generation_prompt = ""
             description = ""
-            updates["_generation_error"] = "All perspective generations failed"
+            updates["_generation_error"] = "All perspective generations failed. Please try again or contact support."
 
     updates["generated_image_url"] = generated_url
     updates["last_generated_image_url"] = generated_url
@@ -1079,12 +1237,28 @@ async def _handle_generating_parallel(
     # Execute all generations with timeout protection
     try:
         results = await asyncio.wait_for(
-            asyncio.gather(*generation_tasks),
+            asyncio.gather(*generation_tasks, return_exceptions=True),
             timeout=IMAGE_GENERATION_TIMEOUT
         )
     except asyncio.TimeoutError:
-        logger.error(f"Image generation timed out after {IMAGE_GENERATION_TIMEOUT}s")
-        updates["messages"] = [{"role": "assistant", "content": "Image generation timed out. Please try again with fewer options or perspectives."}]
+        logger.error(f"[image_analysis] Image generation timed out after {IMAGE_GENERATION_TIMEOUT}s for {total_generations} images")
+        updates["messages"] = [{"role": "assistant", "content": "Image generation timed out. This might be due to generating too many images at once. Please try selecting fewer options or perspectives."}]
+        updates["image_sub_state"] = ImageSubState.DESIGN_CONVERSATION
+        updates["awaiting_user_input"] = True
+        return updates
+    except Exception as gather_error:
+        logger.error(f"[image_analysis] Unexpected error during parallel generation: {gather_error}", exc_info=True)
+        updates["messages"] = [{"role": "assistant", "content": "An unexpected error occurred during image generation. Please try again or select different options."}]
+        updates["image_sub_state"] = ImageSubState.DESIGN_CONVERSATION
+        updates["awaiting_user_input"] = True
+        return updates
+
+    # Filter out exceptions from results
+    results = [r for r in results if isinstance(r, dict)]
+
+    if not results:
+        logger.error("[image_analysis] All generation tasks returned exceptions")
+        updates["messages"] = [{"role": "assistant", "content": "All image generation attempts encountered errors. Please try again or adjust your selections."}]
         updates["image_sub_state"] = ImageSubState.DESIGN_CONVERSATION
         updates["awaiting_user_input"] = True
         return updates
@@ -1110,13 +1284,17 @@ async def _handle_generating_parallel(
     # Add successful results to history
     for result in results:
         if result.get("success"):
-            image_history = add_to_image_history(
-                history=image_history,
-                url=result["url"],
-                description=result.get("description", ""),
-                base_perspective=result.get("perspective", 0),
-                user_satisfied=None
-            )
+            try:
+                image_history = add_to_image_history(
+                    history=image_history,
+                    url=result["url"],
+                    description=result.get("description", ""),
+                    base_perspective=result.get("perspective", 0),
+                    user_satisfied=None
+                )
+            except Exception as history_error:
+                logger.error(f"[image_analysis] Failed to add parallel result to history: {history_error}")
+                # Continue - history failure shouldn't block the workflow
 
     updates["generated_options"] = results
     updates["original_image_urls"] = original_image_urls
@@ -1217,13 +1395,17 @@ async def _handle_confirming_proposal(
                             image_scope=image_scope,
                         )
 
-                        image_history = add_to_image_history(
-                            history=image_history,
-                            url=new_url,
-                            description=new_description,
-                            base_perspective=0,
-                            user_satisfied=None
-                        )
+                        try:
+                            image_history = add_to_image_history(
+                                history=image_history,
+                                url=new_url,
+                                description=new_description,
+                                base_perspective=0,
+                                user_satisfied=None
+                            )
+                        except Exception as history_error:
+                            logger.error(f"[confirming_proposal] Failed to add option switch to history: {history_error}")
+                            # Continue with existing history
 
                         updates["generated_image_url"] = new_url
                         updates["last_generated_image_url"] = new_url
@@ -1237,9 +1419,12 @@ async def _handle_confirming_proposal(
                             f"{new_description}\n\n"
                             f"How's this? Say **'continue'** when ready, or request more changes."
                         )
+                    except LLMProviderError as llm_error:
+                        logger.error(f"[confirming_proposal] LLM provider error during option switch: {llm_error}", exc_info=True)
+                        response = "I'm having trouble with the image generation service. Please try again in a moment or request specific changes."
                     except Exception as e:
-                        logger.info(f"[confirming_proposal] Option switch generation failed: {e}")
-                        response = f"I encountered an issue generating the new option. Please try again or request specific changes."
+                        logger.error(f"[confirming_proposal] Option switch generation failed: {e}", exc_info=True)
+                        response = "I encountered an issue generating the new option. Please try again or request specific changes."
 
                     updates["messages"] = [{"role": "assistant", "content": response}]
                     updates["awaiting_user_input"] = True
@@ -1247,32 +1432,67 @@ async def _handle_confirming_proposal(
 
         # Use LLM-based classification for all user messages - no hardcoded keywords
         context = f"User is reviewing a generated renovation preview with {len(image_history)} generated images."
-        unified_result = await unified_classify(
-            user_message=user_message,
-            context=context,
-            has_generated_images=len(image_history) > 0
-        )
-        conversation_type = unified_result.get("conversation_type", "clarify")
-        conv_type = {
-            "conversation_type": conversation_type,
-            "confidence": unified_result.get("confidence", 0.5),
-            "extracted_question": unified_result.get("extracted_content", {}).get("questions", [None])[0] if unified_result.get("extracted_content", {}).get("questions") else None,
-            "referenced_image_position": unified_result.get("extracted_content", {}).get("referenced_image_position"),
-            "generation_changes": unified_result.get("extracted_content", {}).get("generation_changes")
-        }
+        try:
+            unified_result = await unified_classify(
+                user_message=user_message,
+                context=context,
+                has_generated_images=len(image_history) > 0
+            )
 
-        logger.info(f"[confirming_proposal] Conversation type: {conversation_type} (confidence: {conv_type['confidence']})")
+            # Default to generation_request in confirming_proposal context if classifier fails
+            # (Most user messages here are modification requests)
+            conversation_type = unified_result.get("conversation_type") or "generation_request"
+            confidence = unified_result.get("confidence", 0.5)
+
+            conv_type = {
+                "conversation_type": conversation_type,
+                "confidence": confidence,
+                "extracted_question": unified_result.get("extracted_content", {}).get("questions", [None])[0] if unified_result.get("extracted_content", {}).get("questions") else None,
+                "referenced_image_position": unified_result.get("extracted_content", {}).get("referenced_image_position"),
+                "generation_changes": unified_result.get("extracted_content", {}).get("generation_changes") or user_message
+            }
+
+            logger.info(f"[confirming_proposal] Conversation type: {conversation_type} (confidence: {confidence})")
+        except LLMProviderError as llm_error:
+            logger.error(f"[confirming_proposal] LLM provider error during classification: {llm_error}", exc_info=True)
+            # Fallback to generation_request - safest assumption in this context
+            conversation_type = "generation_request"
+            conv_type = {
+                "conversation_type": "generation_request",
+                "confidence": 0.5,
+                "extracted_question": None,
+                "referenced_image_position": None,
+                "generation_changes": user_message
+            }
+        except Exception as classify_error:
+            logger.error(f"[confirming_proposal] Classification failed: {classify_error}", exc_info=True)
+            # Fallback to generation_request
+            conversation_type = "generation_request"
+            conv_type = {
+                "conversation_type": "generation_request",
+                "confidence": 0.5,
+                "extracted_question": None,
+                "referenced_image_position": None,
+                "generation_changes": user_message
+            }
 
         if conversation_type == "discussion":
             question = conv_type.get("extracted_question") or user_message
             image_to_analyze = current_generated_url or (image_analyses[0]["url"] if image_analyses else None)
             if image_to_analyze:
-                answer = await answer_image_question(
-                    question=question,
-                    image_url=image_to_analyze,
-                    context=f"This is a {project_type} renovation preview"
-                )
-                response = f"{answer}\n\n---\n\nAnything else you'd like to know, or are you ready to continue?"
+                try:
+                    answer = await answer_image_question(
+                        question=question,
+                        image_url=image_to_analyze,
+                        context=f"This is a {project_type} renovation preview"
+                    )
+                    response = f"{answer}\n\n---\n\nAnything else you'd like to know, or are you ready to continue?"
+                except LLMProviderError as llm_error:
+                    logger.error(f"[confirming_proposal] LLM provider error answering question: {llm_error}", exc_info=True)
+                    response = "I'm having trouble answering your question right now. Would you like to continue with the renovation, or ask something else?"
+                except Exception as answer_error:
+                    logger.error(f"[confirming_proposal] Failed to answer image question: {answer_error}", exc_info=True)
+                    response = "I encountered an error answering your question. Let's continue - would you like to proceed with this design or make changes?"
             else:
                 response = "I don't have an image to analyze. Would you like me to generate a renovation preview?"
             updates["messages"] = [{"role": "assistant", "content": response}]
@@ -1526,13 +1746,17 @@ async def _handle_regeneration(
             previous_changes=previous_changes,
         )
 
-        image_history = add_to_image_history(
-            history=image_history,
-            url=new_url,
-            description=new_description,
-            base_perspective=0,
-            user_satisfied=None
-        )
+        try:
+            image_history = add_to_image_history(
+                history=image_history,
+                url=new_url,
+                description=new_description,
+                base_perspective=0,
+                user_satisfied=None
+            )
+        except Exception as history_error:
+            logger.error(f"[_handle_regeneration] Failed to add to history: {history_error}")
+            # Continue with existing history
 
         updates["generated_image_url"] = new_url
         updates["last_generated_image_url"] = new_url
@@ -1546,9 +1770,21 @@ async def _handle_regeneration(
             f"{new_description}\n\n"
             f"How's this? Say **'continue'** when ready, or request more changes."
         )
+    except LLMProviderError as llm_error:
+        logger.error(f"[_handle_regeneration] LLM provider error during regeneration: {llm_error}", exc_info=True)
+        response = (
+            "I'm having trouble with the image generation service right now. "
+            "You can try again in a moment, say **'continue'** to proceed with the current design, "
+            "or request a different change."
+        )
     except Exception as e:
-        logger.info(f"[confirming_proposal] Regeneration failed: {e}")
-        response = f"I encountered an issue. Say **'continue'** to proceed or try a different request."
+        logger.error(f"[_handle_regeneration] Regeneration failed: {e}", exc_info=True)
+        # Provide helpful error message to user
+        response = (
+            "I encountered an issue regenerating the image. This could be due to a temporary service issue. "
+            "You can try again, say **'continue'** to proceed with your current design, "
+            "or request a different change."
+        )
 
     updates["messages"] = [{"role": "assistant", "content": response}]
     updates["awaiting_user_input"] = True
@@ -1608,8 +1844,12 @@ async def _handle_multi_image_regeneration(
                 previous_changes=prev_changes,
             )
             return {"position": img_idx + 1, "url": url, "description": desc, "success": True}
+        except LLMProviderError as llm_error:
+            logger.error(f"[_handle_multi_image_regeneration] LLM provider error for image {img_idx + 1}: {llm_error}", exc_info=True)
+            return {"position": img_idx + 1, "url": None, "description": f"Image generation service error: {str(llm_error)}", "success": False}
         except Exception as e:
-            return {"position": img_idx + 1, "url": None, "description": str(e), "success": False}
+            logger.error(f"[_handle_multi_image_regeneration] Regeneration failed for image {img_idx + 1}: {e}", exc_info=True)
+            return {"position": img_idx + 1, "url": None, "description": f"Failed to regenerate: {str(e)}", "success": False}
 
     regen_tasks = []
     num_current_images = len(generated_options)
@@ -1625,30 +1865,46 @@ async def _handle_multi_image_regeneration(
                 regen_tasks.append(regenerate_single_image(img_pos, specific_fb))
 
     if regen_tasks:
-        results = await asyncio.gather(*regen_tasks)
+        try:
+            results = await asyncio.gather(*regen_tasks, return_exceptions=True)
 
-        for result in results:
-            if result.get("success"):
-                pos = result["position"] - 1
-                if pos < len(generated_options):
-                    generated_options[pos]["url"] = result["url"]
-                    generated_options[pos]["description"] = result["description"]
-                image_history = add_to_image_history(
-                    history=image_history,
-                    url=result["url"],
-                    description=result["description"],
-                    base_perspective=pos,
-                    user_satisfied=None
-                )
+            # Filter out exceptions
+            results = [r for r in results if isinstance(r, dict)]
 
-        updates["generated_options"] = generated_options
-        updates["generated_image_history"] = image_history
-        updates["image_generation_feedback"] = [str(feedback_content)]
+            if not results:
+                logger.error("[_handle_multi_image_regeneration] All regeneration tasks returned exceptions")
+                response = "All image regeneration attempts encountered errors. Please try a different request or contact support."
+            else:
+                for result in results:
+                    if result.get("success"):
+                        pos = result["position"] - 1
+                        if pos < len(generated_options):
+                            generated_options[pos]["url"] = result["url"]
+                            generated_options[pos]["description"] = result["description"]
+                        try:
+                            image_history = add_to_image_history(
+                                history=image_history,
+                                url=result["url"],
+                                description=result["description"],
+                                base_perspective=pos,
+                                user_satisfied=None
+                            )
+                        except Exception as history_error:
+                            logger.error(f"[_handle_multi_image_regeneration] Failed to add to history: {history_error}")
+                            # Continue - history failure shouldn't block the workflow
 
-        response = _format_parallel_options_response(generated_options)
-        response += "\n\nHow do these look now? Say **'continue'** to proceed, or request more changes."
+                updates["generated_options"] = generated_options
+                updates["generated_image_history"] = image_history
+                updates["image_generation_feedback"] = [str(feedback_content)]
+
+                response = _format_parallel_options_response(generated_options)
+                response += "\n\nHow do these look now? Say **'continue'** to proceed, or request more changes."
+        except Exception as gather_error:
+            logger.error(f"[_handle_multi_image_regeneration] Error gathering regeneration tasks: {gather_error}", exc_info=True)
+            response = "An unexpected error occurred during image regeneration. Please try again or request different changes."
     else:
-        response = "I couldn't determine which images to regenerate. Please specify."
+        logger.warning("[_handle_multi_image_regeneration] No regeneration tasks created")
+        response = "I couldn't determine which images to regenerate. Please specify which option you'd like to change."
 
     updates["messages"] = [{"role": "assistant", "content": response}]
     updates["awaiting_user_input"] = True
