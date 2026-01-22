@@ -1,6 +1,20 @@
 import { useState, useEffect, useCallback } from "react";
-import { motion } from "framer-motion";
-import { Home, MapPin, Loader2, ChevronDown, AlertCircle, CheckCircle2 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Home, MapPin, Loader2, ChevronDown, AlertCircle, CheckCircle2, Navigation, Edit3, X } from "lucide-react";
+
+// Geolocation status types
+type GeoStatus = "idle" | "requesting" | "success" | "denied" | "unavailable" | "error";
+
+interface DetectedLocation {
+  zipCode: string;
+  city: string;
+  state: string;
+  streetAddress?: string;
+  latitude?: number;
+  longitude?: number;
+  country?: string;
+  county?: string;
+}
 
 // Common project types for renovation
 const PROJECT_TYPES = [
@@ -15,13 +29,31 @@ const PROJECT_TYPES = [
   { value: "other", label: "Other" },
 ];
 
+interface LocationData {
+  zipCode: string;
+  city?: string;
+  state?: string;
+  streetAddress?: string;
+  latitude?: number;
+  longitude?: number;
+  country?: string;
+  county?: string;
+}
+
 interface ProjectBasicsFormProps {
-  onSubmit: (data: { projectTitle: string; projectType: string; zipCode: string }) => void;
+  onSubmit: (data: {
+    projectTitle: string;
+    projectType: string;
+    zipCode: string;
+    streetAddress?: string;
+    location?: LocationData;
+  }) => void;
   isLoading?: boolean;
   initialData?: {
     projectTitle?: string;
     projectType?: string;
     zipCode?: string;
+    streetAddress?: string;
   };
 }
 
@@ -30,11 +62,138 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
   const [projectType, setProjectType] = useState(initialData?.projectType || "");
   const [customType, setCustomType] = useState("");
   const [zipCode, setZipCode] = useState(initialData?.zipCode || "");
+  const [streetAddress, setStreetAddress] = useState(initialData?.streetAddress || "");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [isValidatingZip, setIsValidatingZip] = useState(false);
   const [zipValidated, setZipValidated] = useState(false);
   const [zipLocationInfo, setZipLocationInfo] = useState<string | null>(null);
+
+  // Geolocation state
+  const [geoStatus, setGeoStatus] = useState<GeoStatus>("idle");
+  const [detectedLocation, setDetectedLocation] = useState<DetectedLocation | null>(null);
+  const [locationConfirmed, setLocationConfirmed] = useState(false);
+  const [showManualEntry, setShowManualEntry] = useState(false);
+
+  // Reverse geocode coordinates to get address info
+  const reverseGeocode = useCallback(async (lat: number, lng: number): Promise<DetectedLocation | null> => {
+    try {
+      // Using BigDataCloud free reverse geocoding API (no API key required)
+      const response = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`
+      );
+      if (!response.ok) {
+        return null;
+      }
+
+      const data = await response.json();
+      // Extract location data - capture as much as possible
+      const zipCode = data.postcode || "";
+      const city = data.city || data.locality || "";
+      const state = data.principalSubdivisionCode?.replace("US-", "") || data.principalSubdivision || "";
+      const country = data.countryCode || data.countryName || "";
+      const county = data.localityInfo?.administrative?.find((a: any) => a.adminLevel === 6)?.name || "";
+
+      if (!zipCode) {
+        return null;
+      }
+
+      return {
+        zipCode,
+        city,
+        state,
+        country,
+        county,
+        latitude: lat,
+        longitude: lng
+      };
+    } catch (error) {
+      return null;
+    }
+  }, []);
+
+  // Request geolocation on mount (only if no initial data)
+  useEffect(() => {
+
+    if (initialData?.zipCode) {
+      setShowManualEntry(true);
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setGeoStatus("unavailable");
+      setShowManualEntry(true);
+      return;
+    }
+
+    setGeoStatus("requesting");
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        console.log("[Geolocation] SUCCESS - Got position:", {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy
+        });
+
+        const { latitude, longitude } = position.coords;
+        const location = await reverseGeocode(latitude, longitude);
+
+        if (location && location.zipCode) {
+          console.log("[Geolocation] Auto-filling form with:", {
+            zipCode: location.zipCode,
+            city: location.city,
+            state: location.state
+          });
+          setDetectedLocation(location);
+          setGeoStatus("success");
+          // Auto-fill the form with detected location
+          setZipCode(location.zipCode);
+          setZipLocationInfo(`${location.city}, ${location.state}`);
+          setZipValidated(true);
+          setLocationConfirmed(true);
+          setShowManualEntry(true);
+        } else {
+          setGeoStatus("error");
+          setShowManualEntry(true);
+        }
+      },
+      (error) => {
+        if (error.code === error.PERMISSION_DENIED) {
+          setGeoStatus("denied");
+        } else {
+          setGeoStatus("error");
+        }
+        setShowManualEntry(true);
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 10000,
+        maximumAge: 300000 // Cache for 5 minutes
+      }
+    );
+  }, [initialData?.zipCode, reverseGeocode]);
+
+  // Handle confirming detected location
+  const handleConfirmLocation = useCallback(async () => {
+    if (!detectedLocation) return;
+
+    setZipCode(detectedLocation.zipCode);
+    setZipLocationInfo(`${detectedLocation.city}, ${detectedLocation.state}`);
+    setLocationConfirmed(true);
+    setZipValidated(true);
+    setShowManualEntry(true);
+  }, [detectedLocation]);
+
+  // Handle editing detected location
+  const handleEditLocation = useCallback(() => {
+    setShowManualEntry(true);
+    setLocationConfirmed(false);
+    // Pre-fill with detected values if available
+    if (detectedLocation) {
+      setZipCode(detectedLocation.zipCode);
+    }
+  }, [detectedLocation]);
 
   // If initial projectType doesn't match predefined options, set it as custom
   useEffect(() => {
@@ -163,10 +322,25 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
     }
 
     const finalType = projectType === "other" ? customType : projectType;
+
+    // Build comprehensive location data
+    const locationData: LocationData = {
+      zipCode: zipCode.trim(),
+      city: detectedLocation?.city || zipLocationInfo?.split(",")[0]?.trim(),
+      state: detectedLocation?.state || zipLocationInfo?.split(",")[1]?.trim(),
+      streetAddress: streetAddress.trim() || undefined,
+      latitude: detectedLocation?.latitude,
+      longitude: detectedLocation?.longitude,
+      country: detectedLocation?.country,
+      county: detectedLocation?.county,
+    };
+
     onSubmit({
       projectTitle: projectTitle.trim(),
       projectType: finalType.trim(),
       zipCode: zipCode.trim(),
+      streetAddress: streetAddress.trim() || undefined,
+      location: locationData,
     });
   };
 
@@ -315,77 +489,204 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
             )}
           </div>
 
-          {/* ZIP Code */}
+          {/* Location Section */}
+          <div>
+            <label className="block text-sm font-medium text-navy-700 dark:text-navy-300 mb-2">
+              Location
+            </label>
+
+            <AnimatePresence mode="wait">
+              {/* Requesting geolocation state */}
+              {geoStatus === "requesting" && (
+                <motion.div
+                  key="requesting"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-amber-100 dark:bg-amber-800 rounded-lg">
+                      <Navigation className="w-5 h-5 text-amber-600 dark:text-amber-400 animate-pulse" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-navy-800 dark:text-navy-200">
+                        Detecting your location...
+                      </p>
+                      <p className="text-xs text-navy-500 dark:text-navy-400">
+                        Allow location access for accurate pricing
+                      </p>
+                    </div>
+                    <Loader2 className="w-5 h-5 text-amber-500 animate-spin ml-auto" />
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Detected location - confirmation card */}
+              {geoStatus === "success" && detectedLocation && !showManualEntry && (
+                <motion.div
+                  key="detected"
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className="p-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700 rounded-xl"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 bg-emerald-100 dark:bg-emerald-800 rounded-lg">
+                      <MapPin className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-navy-800 dark:text-navy-200">
+                        Is this your location?
+                      </p>
+                      <p className="text-base font-semibold text-navy-900 dark:text-white mt-1">
+                        {detectedLocation.city}, {detectedLocation.state} {detectedLocation.zipCode}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      type="button"
+                      onClick={handleConfirmLocation}
+                      className="flex-1 py-2 px-4 bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 size={16} />
+                      Yes, this is correct
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleEditLocation}
+                      className="py-2 px-4 bg-white dark:bg-navy-700 border border-navy-200 dark:border-navy-600 text-navy-700 dark:text-navy-300 text-sm font-medium rounded-lg hover:bg-navy-50 dark:hover:bg-navy-600 transition-colors flex items-center gap-2"
+                    >
+                      <Edit3 size={16} />
+                      Edit
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Manual entry - ZIP Code field */}
+              {showManualEntry && (
+                <motion.div
+                  key="manual"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                >
+                  {/* Show confirmed location banner if applicable */}
+                  {locationConfirmed && detectedLocation && (
+                    <div className="mb-3 p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700 rounded-lg flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 size={16} className="text-emerald-500" />
+                        <span className="text-sm text-navy-700 dark:text-navy-300">
+                          {detectedLocation.city}, {detectedLocation.state}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLocationConfirmed(false);
+                          setZipValidated(false);
+                        }}
+                        className="p-1 text-navy-400 hover:text-navy-600 dark:hover:text-navy-200"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="relative">
+                    <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
+                    <input
+                      id="zipCode"
+                      type="text"
+                      value={zipCode}
+                      onChange={(e) => {
+                        // Only allow digits, max 5
+                        const value = e.target.value.replace(/\D/g, "").slice(0, 5);
+                        setZipCode(value);
+                        // Reset validation state when ZIP changes
+                        setZipValidated(false);
+                        setZipLocationInfo(null);
+                        setLocationConfirmed(false);
+                      }}
+                      onBlur={handleZipBlur}
+                      placeholder="Enter ZIP code (e.g., 90210)"
+                      disabled={isLoading || isValidatingZip}
+                      maxLength={5}
+                      inputMode="numeric"
+                      className={`w-full pl-10 pr-10 py-3 bg-navy-50 dark:bg-navy-900 border rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-all disabled:opacity-50 ${
+                        showError("zipCode")
+                          ? "border-red-400 dark:border-red-500"
+                          : zipValidated
+                          ? "border-emerald-400 dark:border-emerald-500"
+                          : "border-navy-200 dark:border-navy-700"
+                      }`}
+                    />
+                    {/* Validation status indicator */}
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                      {isValidatingZip && (
+                        <Loader2 className="w-5 h-5 text-amber-500 animate-spin" />
+                      )}
+                      {!isValidatingZip && zipValidated && (
+                        <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                      )}
+                    </div>
+                  </div>
+                  {/* Show location info when validated */}
+                  {zipValidated && zipLocationInfo && !locationConfirmed && (
+                    <motion.p
+                      initial={{ opacity: 0, y: -5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mt-1.5 text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1"
+                    >
+                      <CheckCircle2 size={12} />
+                      {zipLocationInfo}
+                    </motion.p>
+                  )}
+                  {!zipValidated && !showError("zipCode") && (
+                    <p className="mt-1.5 text-xs text-navy-400 dark:text-navy-500">
+                      Used for regional pricing adjustments
+                    </p>
+                  )}
+                  {showError("zipCode") && (
+                    <motion.p
+                      initial={{ opacity: 0, y: -5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mt-1 text-sm text-red-500 dark:text-red-400 flex items-center gap-1"
+                    >
+                      <AlertCircle size={14} />
+                      {errors.zipCode}
+                    </motion.p>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Street Address (Optional) */}
           <div>
             <label
-              htmlFor="zipCode"
+              htmlFor="streetAddress"
               className="block text-sm font-medium text-navy-700 dark:text-navy-300 mb-2"
             >
-              ZIP Code
+              Street Address <span className="text-navy-400 font-normal">(optional)</span>
             </label>
             <div className="relative">
-              <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
+              <Home className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-navy-400" />
               <input
-                id="zipCode"
+                id="streetAddress"
                 type="text"
-                value={zipCode}
-                onChange={(e) => {
-                  // Only allow digits, max 5
-                  const value = e.target.value.replace(/\D/g, "").slice(0, 5);
-                  setZipCode(value);
-                  // Reset validation state when ZIP changes
-                  setZipValidated(false);
-                  setZipLocationInfo(null);
-                }}
-                onBlur={handleZipBlur}
-                placeholder="e.g., 90210"
-                disabled={isLoading || isValidatingZip}
-                maxLength={5}
-                inputMode="numeric"
-                className={`w-full pl-10 pr-10 py-3 bg-navy-50 dark:bg-navy-900 border rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-all disabled:opacity-50 ${
-                  showError("zipCode")
-                    ? "border-red-400 dark:border-red-500"
-                    : zipValidated
-                    ? "border-emerald-400 dark:border-emerald-500"
-                    : "border-navy-200 dark:border-navy-700"
-                }`}
+                value={streetAddress}
+                onChange={(e) => setStreetAddress(e.target.value)}
+                placeholder="e.g., 123 Main St"
+                disabled={isLoading}
+                className="w-full pl-10 pr-4 py-3 bg-navy-50 dark:bg-navy-900 border border-navy-200 dark:border-navy-700 rounded-xl text-navy-900 dark:text-white placeholder-navy-400 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent transition-all disabled:opacity-50"
               />
-              {/* Validation status indicator */}
-              <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                {isValidatingZip && (
-                  <Loader2 className="w-5 h-5 text-amber-500 animate-spin" />
-                )}
-                {!isValidatingZip && zipValidated && (
-                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                )}
-              </div>
             </div>
-            {/* Show location info when validated */}
-            {zipValidated && zipLocationInfo && (
-              <motion.p
-                initial={{ opacity: 0, y: -5 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="mt-1.5 text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1"
-              >
-                <CheckCircle2 size={12} />
-                {zipLocationInfo}
-              </motion.p>
-            )}
-            {!zipValidated && !showError("zipCode") && (
-              <p className="mt-1.5 text-xs text-navy-400 dark:text-navy-500">
-                Used for regional pricing adjustments
-              </p>
-            )}
-            {showError("zipCode") && (
-              <motion.p
-                initial={{ opacity: 0, y: -5 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="mt-1 text-sm text-red-500 dark:text-red-400 flex items-center gap-1"
-              >
-                <AlertCircle size={14} />
-                {errors.zipCode}
-              </motion.p>
-            )}
+            <p className="mt-1.5 text-xs text-navy-400 dark:text-navy-500">
+              Enables property-specific insights (NYC addresses get DOB data)
+            </p>
           </div>
 
           {/* Submit Button */}

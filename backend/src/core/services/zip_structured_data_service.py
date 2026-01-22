@@ -486,7 +486,7 @@ def tavily_search(
     api_key: str,
     query: str,
     search_depth: str = "advanced",
-    max_results: int = 2,  # Reduced from 5 to 2 for faster fetching
+    max_results: int = 5,  # Reduced from 5 to 2 for faster fetching
     include_raw_content: bool = False,
 ) -> List[TavilyResult]:
     """Execute Tavily search with strict timeout."""
@@ -701,7 +701,8 @@ REQUIREMENTS:
 - Return ONLY valid JSON, no markdown"""
 
     try:
-        provider = LLMProvider.for_llm()
+        # Use Cerebras for fast analysis of Tavily search results
+        provider = LLMProvider.for_fast_analysis()
 
         response = await provider.complete(
             messages=[

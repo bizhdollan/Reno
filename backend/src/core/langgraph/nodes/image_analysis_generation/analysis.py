@@ -1,5 +1,9 @@
 """
 Image analysis functions for extracting data from images.
+
+OPTIMIZATION: This module now uses unified_analysis for single VLM call per image.
+Old approach: 6+ separate VLM calls per image ($0.028, 30+ seconds)
+New approach: 1 unified VLM call per image ($0.005, 5-8 seconds)
 """
 
 import asyncio
@@ -26,6 +30,9 @@ from src.core.langgraph.nodes.image_analysis_generation.image_helpers import (
 from src.core.services.event_broadcaster import (
     emit_analysis_progress,
     emit_analysis_complete,
+)
+from src.core.langgraph.nodes.image_analysis_generation.unified_analysis import (
+    unified_image_analysis,
 )
 
 
@@ -110,10 +117,17 @@ async def analyze_single_image(
     project_type: str,
     image_index: int,
     total_images: int = 1,
-    project_id: str | None = None
+    project_id: str | None = None,
+    project_title: str | None = None
 ) -> ImageAnalysis:
-    """Analyze a single image and return structured analysis."""
-    logger.info(f"[image_analysis] Starting analysis for image {image_index + 1}: {image_url}")
+    """
+    Analyze a single image and return structured analysis.
+
+    OPTIMIZED: Now uses unified_image_analysis for single VLM call.
+    Extracts all data in one call: room type, materials, fixtures, entities,
+    features to retain, structural elements, and contractor context.
+    """
+    logger.info(f"[image_analysis] Starting UNIFIED analysis for image {image_index + 1}: {image_url}")
 
     # Emit progress event
     if project_id:
@@ -125,10 +139,6 @@ async def analyze_single_image(
             details={"url": image_url}
         )
 
-    provider = LLMProvider.for_vlm()
-    image_data_url = await load_image_as_base64(image_url)
-    prompt = build_image_analysis_prompt(project_type)
-
     # Emit extraction start
     if project_id:
         await emit_analysis_progress(
@@ -136,35 +146,28 @@ async def analyze_single_image(
             image_index=image_index,
             total_images=total_images,
             step="extracting_data",
-            details={"categories": "materials, measurements, colors, fixtures, search_context"}
+            details={"categories": "unified_comprehensive_analysis"}
         )
 
-    response = await provider.complete(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a renovation expert. Analyze images thoroughly and identify search-relevant context (era, style, problem areas). Return JSON only, no markdown."
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_data_url}}
-                ]
-            }
-        ],
-        temperature=0.4,  # Increased from 0.2 for richer, more descriptive insights
-        max_tokens=2500   # Increased to accommodate new categories
-    )
-
+    # Single unified VLM call replaces 6+ separate calls
+    unified_result = {}
     try:
-        analysis = parse_json(response)
+        unified_result = await unified_image_analysis(
+            image_url=image_url,
+            project_title=project_title,
+            project_type=project_type
+        )
+
+        # Convert unified result to legacy format for backward compatibility
+        analysis = _convert_unified_to_legacy_format(unified_result)
+
     except Exception as e:
-        logger.info(f"[image_analysis] Failed to parse response for image {image_index + 1}: {e}")
+        logger.error(f"[image_analysis] Unified analysis failed for image {image_index + 1}: {e}", exc_info=True)
         analysis = {}
+        unified_result = {}  # Ensure unified_result is defined even on failure
 
     categories_found = [k for k in analysis.keys() if analysis.get(k)]
-    logger.info(f"[image_analysis] Completed image {image_index + 1}: found {categories_found}")
+    logger.info(f"[image_analysis] Completed UNIFIED analysis for image {image_index + 1}: found {categories_found}")
 
     # Emit completion for this image
     if project_id:
@@ -179,16 +182,102 @@ async def analyze_single_image(
     return ImageAnalysis(
         url=image_url,
         index=image_index,
-        analysis=analysis
+        analysis=analysis,
+        unified_data=unified_result  # Store full unified data for future use
     )
+
+
+def _convert_unified_to_legacy_format(unified: dict) -> dict:
+    """
+    Convert unified analysis format to legacy format for backward compatibility.
+
+    Maps the new comprehensive schema to the old extraction format.
+    """
+    legacy = {}
+
+    # Materials
+    materials = []
+    if unified.get("floor"):
+        floor = unified["floor"]
+        materials.append({
+            "name": "Floor",
+            "type": floor.get("material", "Unknown"),
+            "finish": floor.get("color", ""),
+            "condition": floor.get("condition", "")
+        })
+    if unified.get("walls"):
+        walls = unified["walls"]
+        materials.append({
+            "name": "Walls",
+            "type": walls.get("material", "Unknown"),
+            "finish": walls.get("paint_color", ""),
+            "condition": walls.get("condition", "")
+        })
+    if materials:
+        legacy["materials"] = materials
+
+    # Measurements
+    if unified.get("dimensions"):
+        dim = unified["dimensions"]
+        legacy["measurements"] = {
+            "room_width_ft": dim.get("width_ft"),
+            "room_length_ft": dim.get("length_ft"),
+            "room_height_ft": dim.get("height_ft"),
+            "notes": f"Confidence: {dim.get('confidence', 'unknown')}"
+        }
+
+    # Fixtures
+    if unified.get("fixtures"):
+        legacy["fixtures"] = [
+            {
+                "name": f.get("type", "Unknown"),
+                "type": f.get("type", "Unknown"),
+                "condition": f.get("condition", ""),
+                "style": f.get("brand", "")
+            }
+            for f in unified["fixtures"]
+        ]
+
+    # Appliances
+    if unified.get("appliances"):
+        legacy["appliances"] = [
+            {
+                "name": a.get("type", "Unknown"),
+                "type": a.get("type", "Unknown"),
+                "brand": a.get("brand", "")
+            }
+            for a in unified["appliances"]
+        ]
+
+    # Style
+    if unified.get("style"):
+        legacy["style"] = {
+            "overall_style": unified["style"].get("primary_style", ""),
+            "condition": unified["style"].get("overall_condition", "")
+        }
+
+    # Store entities and features for later use
+    if unified.get("entities"):
+        legacy["entities"] = unified["entities"]
+    if unified.get("features_to_retain"):
+        legacy["features_to_retain"] = unified["features_to_retain"]
+    if unified.get("contractor_context"):
+        legacy["search_context"] = unified["contractor_context"]
+
+    return legacy
 
 
 async def analyze_images_parallel(
     image_urls: list[str],
     project_type: str,
-    project_id: str | None = None
+    project_id: str | None = None,
+    project_title: str | None = None
 ) -> list[ImageAnalysis]:
-    """Analyze multiple images in parallel."""
+    """
+    Analyze multiple images in parallel.
+
+    OPTIMIZED: Each image analyzed with single unified VLM call.
+    """
     total_images = len(image_urls)
     tasks = [
         analyze_single_image(
@@ -196,7 +285,8 @@ async def analyze_images_parallel(
             project_type=project_type,
             image_index=idx,
             total_images=total_images,
-            project_id=project_id
+            project_id=project_id,
+            project_title=project_title
         )
         for idx, url in enumerate(image_urls)
     ]

@@ -65,7 +65,8 @@ class ImageAnalysis(TypedDict, total=False):
     """Analysis data for a single uploaded image."""
     url: str
     index: int
-    analysis: dict  # Contains all extracted categories
+    analysis: dict  # Legacy format - contains all extracted categories
+    unified_data: dict  # NEW: Full unified analysis (room, materials, entities, features, etc.)
 
 
 class ExtractedData(TypedDict, total=False):
@@ -225,6 +226,9 @@ def create_initial_state(project_id: str | None = None) -> ProjectState:
 
     Returns:
         New ProjectState with initialized fields
+
+    Note: Initial state starts at project_basics (to show form).
+    After form submission via /api/v1/projects/{token}/basics, stage transitions to image_analysis_generation.
     """
     return ProjectState(
         # Core fields (new lightweight architecture)
@@ -238,8 +242,8 @@ def create_initial_state(project_id: str | None = None) -> ProjectState:
         context_cache={},
 
         # Legacy fields (backward compatibility)
-        current_stage="project_basics",
-        image_sub_state="analyzing",
+        current_stage="project_basics",  # Show form initially, transitions after submission
+        image_sub_state="analyzing",  # Start with analyzing (waits for images)
         project_title=None,
         project_type=None,
         zip_code=None,

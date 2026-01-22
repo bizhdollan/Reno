@@ -1805,35 +1805,62 @@ export default function EstimatePage() {
     }
   }, [pendingFiles, hasUploadedInitialImages, isSending, sendMessage]);
 
-  // Handle project basics form submission
-  const handleProjectBasicsSubmit = useCallback(async (data: { projectTitle: string; projectType: string; zipCode: string }) => {
+  // Handle project basics form submission - calls dedicated endpoint (no LLM)
+  const handleProjectBasicsSubmit = useCallback(async (data: {
+    projectTitle: string;
+    projectType: string;
+    zipCode: string;
+    streetAddress?: string;
+    location?: {
+      zipCode: string;
+      city?: string;
+      state?: string;
+      streetAddress?: string;
+      latitude?: number;
+      longitude?: number;
+      country?: string;
+      county?: string;
+    };
+  }) => {
     setIsSubmittingForm(true);
     setError(null);
 
     try {
-      // Send form data as a structured message that backend can parse
-      const formMessage = `My project is titled "${data.projectTitle}". It's a ${data.projectType} renovation. My ZIP code is ${data.zipCode}.`;
-
-      // Add user message to display
-      setMessages((prev) => [...prev, {
-        role: "user",
-        content: formMessage,
-        timestamp: new Date().toISOString()
-      }]);
-
-      // Send to backend
-      const res = await fetch(`${API_BASE}/chat`, {
+      // Call the dedicated project basics endpoint (bypasses LLM)
+      const res = await fetch(`${API_BASE}/projects/${projectId}/basics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project_id: projectId, message: formMessage })
+        body: JSON.stringify({
+          project_title: data.projectTitle,
+          project_type: data.projectType,
+          zip_code: data.zipCode,
+          street_address: data.streetAddress,
+          location: data.location ? {
+            zip_code: data.location.zipCode,
+            city: data.location.city,
+            state: data.location.state,
+            street_address: data.location.streetAddress,
+            latitude: data.location.latitude,
+            longitude: data.location.longitude,
+            country: data.location.country,
+            county: data.location.county,
+          } : undefined
+        })
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ message: "Something went wrong" }));
-        throw new Error(errorData.message || "Failed to submit project details");
+        const errorData = await res.json().catch(() => ({ detail: "Something went wrong" }));
+        throw new Error(errorData.detail || "Failed to submit project details");
       }
 
       const responseData: any = await res.json();
+
+      console.log("[ProjectBasicsSubmit] Response received:", {
+        current_stage: responseData.state?.current_stage,
+        image_sub_state: responseData.state?.image_sub_state,
+        has_messages: !!responseData.state?.messages,
+        project_id: responseData.project_id
+      });
 
       // Update project ID and state
       if (responseData.project_id) {
@@ -1844,12 +1871,10 @@ export default function EstimatePage() {
       }
       setProjectState(responseData.state);
 
-      // Add assistant response
-      setMessages((prev) => [...prev, {
-        role: "assistant",
-        content: responseData.assistant || "Great! Let's move on to the next step.",
-        timestamp: new Date().toISOString()
-      }]);
+      console.log("[ProjectBasicsSubmit] State updated. New current_stage:", responseData.state?.current_stage);
+
+      // Don't add the transition message - the image upload UI is self-explanatory
+      // The "Upload your bedroom photos" card already has clear instructions
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to submit project details");
     } finally {
@@ -1864,11 +1889,21 @@ export default function EstimatePage() {
   // Show form instead of chat when on project_basics stage and details not yet collected
   const showProjectBasicsForm = projectState?.current_stage === "project_basics" && !projectState?.project_title;
 
-  // Show canvas on desktop when there are images to display or in image_analysis_generation stage
+  // Show canvas on desktop when in image_analysis_generation stage (project_basics handled by form)
   const showCanvas = !showProjectBasicsForm && (
-    projectState?.current_stage === "image_analysis_generation" ||
-    (projectState?.current_stage === "project_basics" && !!projectState?.project_title)
+    projectState?.current_stage === "image_analysis_generation"
   );
+
+  // Debug logging for UI state
+  useEffect(() => {
+    console.log("[EstimatePage] UI State:", {
+      current_stage: projectState?.current_stage,
+      project_title: projectState?.project_title,
+      showProjectBasicsForm,
+      showCanvas,
+      isSubmittingForm
+    });
+  }, [projectState?.current_stage, projectState?.project_title, showProjectBasicsForm, showCanvas, isSubmittingForm]);
 
   // Extract images from messages for the canvas
   const canvasImages = useMemo(() => {
@@ -2000,7 +2035,6 @@ export default function EstimatePage() {
 
   // Determine if we're in the initial image upload phase (before images are acknowledged by assistant)
   const isInInitialImagePhase = (
-    (projectState?.current_stage === "project_basics" && !!projectState?.project_title) ||
     projectState?.current_stage === "image_analysis_generation"
   ) && !showProjectBasicsForm && canvasImages.length === 0;
 
@@ -2130,8 +2164,8 @@ export default function EstimatePage() {
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-navy-50 to-white dark:from-navy-950 dark:to-navy-900">
       {/* Header */}
-      <header className={`flex-shrink-0 border-b border-navy-100 dark:border-navy-800 bg-white/80 dark:bg-navy-900/80 backdrop-blur-lg sticky top-16 md:top-20 z-30 ${showCanvas ? "lg:w-[45%]" : ""}`}>
-        <div className={`px-3 sm:px-4 py-2 sm:py-3 ${showCanvas ? "" : "max-w-4xl mx-auto"}`}>
+      <header className={`flex-shrink-0 border-b border-navy-100 dark:border-navy-800 bg-white/80 dark:bg-navy-900/80 backdrop-blur-lg sticky top-16 md:top-20 z-30 ${showCanvas && canvasImages.length > 0 ? "lg:w-[45%]" : ""}`}>
+        <div className={`px-3 sm:px-4 py-2 sm:py-3 ${showCanvas && canvasImages.length > 0 ? "" : "max-w-4xl mx-auto"}`}>
           <div className="flex items-center justify-between mb-2 sm:mb-3">
             <div className="min-w-0 flex-1">
               <h1 className="text-base sm:text-xl font-bold text-navy-900 dark:text-white truncate">Renovation Estimator</h1>
@@ -2186,12 +2220,24 @@ export default function EstimatePage() {
         ) : showCanvas ? (
           /* Split-screen: Chat (left) + Fixed Canvas (right) on desktop */
           <>
-            {/* Chat Panel - Full width on mobile, left side on desktop */}
-            <div className="h-full overflow-y-auto lg:pr-[55%]">
+            {/* Chat Panel - Full width on mobile, left side on desktop (only when canvas has images) */}
+            <div className={`h-full overflow-y-auto ${canvasImages.length > 0 ? 'lg:pr-[55%]' : ''}`}>
               <div className="px-3 sm:px-4 py-4 sm:py-6">
                 <div className="space-y-4 sm:space-y-6 mt-14 sm:mt-16">
                   <AnimatePresence>
-                    {messages.map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
+                    {messages
+                      .filter(msg => {
+                        // Filter out empty messages
+                        if (!msg.content || (typeof msg.content === "string" && msg.content.trim() === "")) {
+                          return false;
+                        }
+                        // Filter out the transition message from project basics
+                        if (msg.role === "assistant" && typeof msg.content === "string") {
+                          return !msg.content.includes("is set up for") && !msg.content.includes("Now, please upload images");
+                        }
+                        return true;
+                      })
+                      .map((msg, idx) => <MessageBubble key={idx} message={msg} onSelectTier={handleSelectTier} onSelectSuggestion={handleSelectSuggestion} onImageClick={setLightboxImage} />)}
                   </AnimatePresence>
 
                   {/* Typing indicator */}
@@ -2215,18 +2261,20 @@ export default function EstimatePage() {
             </div>
 
             {/* Fixed Canvas Panel - Right side on desktop, starts from main header */}
-            <div className="hidden lg:block fixed top-16 md:top-20 right-0 bottom-0 w-[55%] border-l border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-900 z-20">
-              <Canvas
-                images={canvasImages}
-                selectedImageId={selectedCanvasImageId || undefined}
-                onSelectImage={setSelectedCanvasImageId}
-                onImageClick={setLightboxImage}
-                isAnalyzing={isSendingImages && !hasGeneratedImages}
-                isGenerating={isSending && hasGeneratedImages}
-                showContinueButton={showContinueButton}
-                onContinue={handleContinueToEstimate}
-              />
-            </div>
+            {canvasImages.length > 0 && (
+              <div className="hidden lg:block fixed top-16 md:top-20 right-0 bottom-0 w-[55%] border-l border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-900 z-20">
+                <Canvas
+                  images={canvasImages}
+                  selectedImageId={selectedCanvasImageId || undefined}
+                  onSelectImage={setSelectedCanvasImageId}
+                  onImageClick={setLightboxImage}
+                  isAnalyzing={isSendingImages && !hasGeneratedImages}
+                  isGenerating={isSending && hasGeneratedImages}
+                  showContinueButton={showContinueButton}
+                  onContinue={handleContinueToEstimate}
+                />
+              </div>
+            )}
           </>
         ) : showCostEstimationView ? (
           /* Cost Estimation View - Beautiful full-screen on desktop, chat on mobile */
@@ -2276,8 +2324,8 @@ export default function EstimatePage() {
       {/* Error */}
       <AnimatePresence>
         {error && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} className={`flex-shrink-0 border-t border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/20 px-4 py-3 ${showCanvas ? "lg:w-[45%]" : ""}`}>
-            <div className={`flex items-center justify-between ${showCanvas ? "" : "max-w-4xl mx-auto"}`}>
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} className={`flex-shrink-0 border-t border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/20 px-4 py-3 ${showCanvas && canvasImages.length > 0 ? "lg:w-[45%]" : ""}`}>
+            <div className={`flex items-center justify-between ${showCanvas && canvasImages.length > 0 ? "" : "max-w-4xl mx-auto"}`}>
               <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
               <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700">
                 <X size={16} />
@@ -2294,9 +2342,9 @@ export default function EstimatePage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
-            className={`flex-shrink-0 px-3 sm:px-4 pb-2 ${showCanvas ? "lg:w-[45%]" : ""}`}
+            className={`flex-shrink-0 px-3 sm:px-4 pb-2 ${showCanvas && canvasImages.length > 0 ? "lg:w-[45%]" : ""}`}
           >
-            <div className={showCanvas ? "" : "max-w-4xl mx-auto"}>
+            <div className={showCanvas && canvasImages.length > 0 ? "" : "max-w-4xl mx-auto"}>
               <ContextProgress />
             </div>
           </motion.div>
@@ -2306,8 +2354,8 @@ export default function EstimatePage() {
       {/* Input - hide when showing form, completed, or in initial image phase (before images are acknowledged) */}
       {/* Also hide on desktop when showing CostEstimationView */}
       {!isCompleted && !showProjectBasicsForm && !hideFooterDuringInitialPhase && (
-        <footer className={`flex-shrink-0 border-t border-navy-100 dark:border-navy-800 bg-white dark:bg-navy-900 sticky bottom-0 z-10 ${showCanvas ? "lg:w-[45%]" : ""} ${showCostEstimationView ? "lg:hidden" : ""}`}>
-          <div className={`px-3 sm:px-4 py-2 sm:py-3 ${showCanvas ? "" : "max-w-4xl mx-auto"}`}>
+        <footer className={`flex-shrink-0 border-t border-navy-100 dark:border-navy-800 bg-white dark:bg-navy-900 sticky bottom-0 z-10 ${showCanvas && canvasImages.length > 0 ? "lg:w-[45%]" : ""} ${showCostEstimationView ? "lg:hidden" : ""}`}>
+          <div className={`px-3 sm:px-4 py-2 sm:py-3 ${showCanvas && canvasImages.length > 0 ? "" : "max-w-4xl mx-auto"}`}>
             <AnimatePresence>
               {pendingFiles.length > 0 && <ImagePreview files={pendingFiles} onRemove={removeFile} />}
             </AnimatePresence>

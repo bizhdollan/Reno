@@ -52,6 +52,34 @@ class Project(Base):
     accepted_tier = Column(String(10), nullable=True)  # low, mid, high
     total_price = Column(Numeric(10, 2), nullable=True)  # Selected tier price
     brief_scope = Column(Text, nullable=True)  # Short description for marketplace
+
+    # Project title (from form)
+    project_title = Column(String(255), nullable=True)
+
+    # Address fields (for property intelligence)
+    street_address = Column(String(255), nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(50), nullable=True)
+    county = Column(String(100), nullable=True)
+    country = Column(String(50), nullable=True, default="US")
+    latitude = Column(Numeric(10, 7), nullable=True)
+    longitude = Column(Numeric(10, 7), nullable=True)
+    is_nyc = Column(Boolean, default=False, nullable=False)
+    borough = Column(String(50), nullable=True)  # For NYC: Manhattan, Brooklyn, etc.
+
+    # NYC DOB fields (populated when is_nyc=True)
+    nyc_bbl = Column(String(20), nullable=True)  # Borough-Block-Lot
+    building_age = Column(Integer, nullable=True)  # Year built
+    zoning_district = Column(String(50), nullable=True)
+    landmark_status = Column(String(50), nullable=True)  # None, Individual, Historic District
+    open_violations_count = Column(Integer, nullable=True)
+    dob_data = Column(JSONB, nullable=True)  # Full DOB property data
+
+    # Session preferences (sticky notes)
+    session_sticky_notes = Column(JSONB, nullable=True)  # Array of {category, content, created_at}
+
+    # HITL tracking
+    pending_hitl_questions = Column(JSONB, nullable=True)  # Array of unresolved HITL questions
     
     # Full project data (JSON columns)
     full_estimate = Column(JSONB, nullable=True)  # Complete 3-tier breakdown

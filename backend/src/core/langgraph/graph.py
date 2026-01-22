@@ -1,11 +1,10 @@
 """
 Main LangGraph definition for renovation estimation.
 
-4-Stage Architecture:
-1. project_basics - Collect title, type, zip_code
-2. image_analysis_generation - Analyze images, confirm, collect vision, generate preview
-3. final_review - Review all data before estimation
-4. cost_estimation - Generate 3-tier estimate, handle selection
+3-Stage Architecture (project_basics handled by form):
+1. image_analysis_generation - Analyze images, confirm, collect vision, generate preview
+2. final_review - Review all data before estimation
+3. cost_estimation - Generate 3-tier estimate, handle selection
 """
 
 from langgraph.graph import StateGraph, START, END
@@ -14,7 +13,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.core.langgraph.state import ProjectState, create_initial_state
 from src.core.langgraph.utils import get_message_content
 from src.core.langgraph.nodes import (
-    project_basics_node,
     image_analysis_generation_node,
     final_review_node,
     cost_estimation_node,
@@ -24,10 +22,15 @@ from src.core.langgraph.nodes import (
 def route_by_stage(state: ProjectState) -> str:
     """Route to appropriate node based on current stage."""
     stage = state.get("current_stage", "project_basics")
-    
+
+    # project_basics is handled by form submission, not by graph
+    # If in this stage, end immediately (awaiting form submission)
+    if stage == "project_basics":
+        return END
+
     if stage == "completed":
         return END
-    
+
     return stage
 
 
@@ -41,37 +44,26 @@ def should_continue(state: ProjectState) -> str:
 def create_graph(checkpointer: str | None = None):
     """
     Create the renovation estimation graph.
-    
+
     Supports auto-continue when a node sets awaiting_user_input=False.
+    Note: project_basics is now handled by form submission (/api/v1/projects/{token}/basics)
     """
     builder = StateGraph(ProjectState)
-    
-    # Add nodes (4 stages)
-    builder.add_node("project_basics", project_basics_node)
+
+    # Add nodes (3 stages - project_basics handled by form)
     builder.add_node("image_analysis_generation", image_analysis_generation_node)
     builder.add_node("final_review", final_review_node)
     builder.add_node("cost_estimation", cost_estimation_node)
-    
+
     # Entry point routes to current stage
     builder.add_conditional_edges(
         START,
         route_by_stage,
         {
-            "project_basics": "project_basics",
             "image_analysis_generation": "image_analysis_generation",
             "final_review": "final_review",
             "cost_estimation": "cost_estimation",
             END: END
-        }
-    )
-    
-    # project_basics can auto-continue to image_analysis
-    builder.add_conditional_edges(
-        "project_basics",
-        should_continue,
-        {
-            "continue": "image_analysis_generation",
-            "end": END
         }
     )
     

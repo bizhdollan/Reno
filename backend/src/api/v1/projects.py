@@ -8,6 +8,7 @@ Handles:
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from typing import Optional
 
 from src.core.logger import get_logger
@@ -20,6 +21,8 @@ from src.db.schemas import (
     ProjectSaveResponse,
     ProjectResponse,
     ProjectPublish,
+    ProjectBasicsRequest,
+    ProjectBasicsResponse,
 )
 from src.services.email_service import email_service
 
@@ -237,3 +240,163 @@ async def mark_project_complete_homeowner(
     db.refresh(project)
 
     return ProjectResponse.model_validate(project)
+
+
+@router.post("/{token}/basics", response_model=ProjectBasicsResponse)
+async def submit_project_basics(
+    token: str,
+    request: ProjectBasicsRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Submit project basics form data directly (bypasses LLM).
+
+    This endpoint saves project title, type, and location data
+    directly to the database without LLM processing.
+    Transitions the project to image_analysis_generation stage.
+
+    Args:
+        token: Project token (PRJ-XXXXXX)
+        request: Project basics form data
+        db: Database session
+
+    Returns:
+        ProjectBasicsResponse with updated state
+    """
+    from decimal import Decimal
+    from src.core.services.location_service import validate_us_zip_code
+    from src.core.services.renovation_inspiration_service import start_location_prefetch_background
+
+    # Find project by token
+    project = db.query(Project).filter(Project.token == token).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Validate zip code format
+    if not validate_us_zip_code(request.zip_code):
+        raise HTTPException(status_code=400, detail="Invalid US ZIP code format")
+
+    # Update Project table with all location data
+    project.project_title = request.project_title
+    project.project_type = request.project_type
+    project.zip_code = request.zip_code
+    project.street_address = request.street_address
+
+    # Store comprehensive location data if provided
+    if request.location:
+        project.city = request.location.city
+        project.state = request.location.state
+        project.county = request.location.county
+        project.country = request.location.country or "US"
+        if request.location.latitude:
+            project.latitude = Decimal(str(request.location.latitude))
+        if request.location.longitude:
+            project.longitude = Decimal(str(request.location.longitude))
+
+        # Check if NYC based on state and zip
+        nyc_zip_prefixes = ['100', '101', '102', '103', '104', '110', '111', '112', '113', '114']
+        is_nyc = (
+            request.location.state in ['NY', 'New York'] and
+            any(request.zip_code.startswith(prefix) for prefix in nyc_zip_prefixes)
+        )
+        project.is_nyc = is_nyc
+
+        # Detect borough from city name for NYC
+        if is_nyc and request.location.city:
+            city_lower = request.location.city.lower()
+            if 'manhattan' in city_lower or city_lower == 'new york':
+                project.borough = 'Manhattan'
+            elif 'brooklyn' in city_lower:
+                project.borough = 'Brooklyn'
+            elif 'queens' in city_lower:
+                project.borough = 'Queens'
+            elif 'bronx' in city_lower:
+                project.borough = 'Bronx'
+            elif 'staten island' in city_lower:
+                project.borough = 'Staten Island'
+
+    # Get or create ConversationState
+    conv_state = db.query(ConversationState).filter(
+        ConversationState.project_id == project.id
+    ).first()
+
+    if conv_state:
+        # Update existing state
+        state = conv_state.state or {}
+        state["project_title"] = request.project_title
+        state["project_type"] = request.project_type
+        state["zip_code"] = request.zip_code
+        state["current_stage"] = "image_analysis_generation"
+        state["awaiting_user_input"] = True
+        state["image_sub_state"] = "analyzing"  # Valid ImageSubState value
+
+        # Don't add assistant message - the image upload UI is self-explanatory
+        # Initialize messages array if it doesn't exist
+        if "messages" not in state:
+            state["messages"] = []
+
+        # IMPORTANT: Reassign to trigger SQLAlchemy change detection for JSON column
+        conv_state.state = dict(state)
+        flag_modified(conv_state, "state")
+    else:
+        # Create new state
+        state = {
+            "project_id": token,
+            "internal_project_id": str(project.id),
+            "project_title": request.project_title,
+            "project_type": request.project_type,
+            "zip_code": request.zip_code,
+            "current_stage": "image_analysis_generation",
+            "awaiting_user_input": True,
+            "image_sub_state": "analyzing",  # Valid ImageSubState value
+            "messages": []  # Empty messages - no assistant greeting needed
+        }
+        conv_state = ConversationState(
+            project_id=project.id,
+            state=state
+        )
+        db.add(conv_state)
+
+    db.commit()
+    db.refresh(project)
+    db.refresh(conv_state)
+
+    # Start background location prefetch (Census + Climate data)
+    # Only prefetch if we don't already have comprehensive location data from geolocation
+    should_prefetch = True
+    if request.location:
+        # If we have geolocation data (city, state, lat/lng), skip redundant ZIP lookup
+        # We still want Census/Climate data, so only skip if we already have those
+        has_geolocation = (
+            request.location.city and
+            request.location.state and
+            request.location.latitude is not None and
+            request.location.longitude is not None
+        )
+        if has_geolocation:
+            logger.info(f"[basics] Using geolocation data (skipping ZIP lookup): {request.location.city}, {request.location.state}")
+            # Note: We still start prefetch for Census/Climate data, just log that we have geo data
+
+    try:
+        start_location_prefetch_background(
+            project_id=project.id,
+            zip_code=request.zip_code
+        )
+        logger.info(f"[basics] Started location prefetch for {request.zip_code}")
+    except Exception as e:
+        logger.warning(f"[basics] Failed to start location prefetch: {e}")
+
+    logger.info(f"[basics] Project {token} basics saved: {request.project_type} in {request.zip_code}")
+
+    # Debug: Log what we're returning
+    logger.info(f"[basics] Returning state with current_stage: {conv_state.state.get('current_stage')}")
+    logger.info(f"[basics] Full state keys: {list(conv_state.state.keys())}")
+
+    return ProjectBasicsResponse(
+        success=True,
+        project_id=token,
+        internal_id=str(project.id),
+        current_stage="image_analysis_generation",
+        message=f"Project basics saved. Ready for image upload.",
+        state=conv_state.state
+    )

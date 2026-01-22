@@ -107,6 +107,41 @@ class ProjectSaveResponse(BaseModel):
 
 
 # ============================================================================
+# PROJECT BASICS FORM SCHEMAS (Direct form submission - no LLM)
+# ============================================================================
+
+class LocationData(BaseModel):
+    """Comprehensive location data from geolocation"""
+    zip_code: str = Field(..., min_length=5, max_length=10)
+    city: Optional[str] = None
+    state: Optional[str] = None
+    street_address: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    country: Optional[str] = None
+    county: Optional[str] = None
+
+
+class ProjectBasicsRequest(BaseModel):
+    """Request to submit project basics form (bypasses LLM)"""
+    project_title: str = Field(..., min_length=1, max_length=255)
+    project_type: str = Field(..., min_length=1, max_length=100)
+    zip_code: str = Field(..., min_length=5, max_length=10)
+    street_address: Optional[str] = None
+    location: Optional[LocationData] = None
+
+
+class ProjectBasicsResponse(BaseModel):
+    """Response after submitting project basics"""
+    success: bool
+    project_id: str  # PRJ-XXXXXX token
+    internal_id: str  # UUID for database
+    current_stage: str
+    message: str
+    state: Optional[dict[str, Any]] = None
+
+
+# ============================================================================
 # UNLOCK SCHEMAS
 # ============================================================================
 

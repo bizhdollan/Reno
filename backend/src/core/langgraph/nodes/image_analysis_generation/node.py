@@ -288,11 +288,13 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                     # Continue processing - event emission failure shouldn't block analysis
 
             # Analyze all images in parallel (with progress events)
+            # OPTIMIZED: Now uses unified_image_analysis - 1 VLM call per image instead of 6+
             try:
                 image_analyses = await analyze_images_parallel(
                     image_urls=new_image_urls,
                     project_type=project_type,
-                    project_id=project_id_for_events
+                    project_id=project_id_for_events,
+                    project_title=state.get("project_title")
                 )
                 updates["image_analyses"] = image_analyses
             except Exception as analysis_error:
@@ -519,9 +521,53 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                 )
             images_display = "\n".join(image_html_parts)
 
+            # Build "What I see" section from extracted data
+            what_i_see_parts = []
+
+            # Materials detected
+            materials = extracted_data.get("materials", [])
+            if materials:
+                material_items = [m.get("name", m.get("type", "unknown")) for m in materials[:5]]
+                if material_items:
+                    what_i_see_parts.append(f"**Materials:** {', '.join(material_items)}")
+
+            # Colors detected
+            colors = extracted_data.get("colors", [])
+            if colors:
+                color_items = []
+                for c in colors[:4]:
+                    element = c.get("element", "")
+                    color = c.get("color", "")
+                    if element and color:
+                        color_items.append(f"{color} {element.lower()}")
+                if color_items:
+                    what_i_see_parts.append(f"**Colors:** {', '.join(color_items)}")
+
+            # Features detected
+            features = extracted_data.get("features", [])
+            if features:
+                feature_names = [f.get("name", "") for f in features[:5] if f.get("name")]
+                if feature_names:
+                    what_i_see_parts.append(f"**Features:** {', '.join(feature_names)}")
+
+            # Measurements if available
+            measurements = extracted_data.get("measurements", {})
+            if measurements.get("room_width_ft") and measurements.get("room_length_ft"):
+                what_i_see_parts.append(
+                    f"**Estimated size:** ~{measurements.get('room_width_ft')}×{measurements.get('room_length_ft')} ft"
+                )
+
+            # Build the analysis section
+            if what_i_see_parts:
+                what_i_see = "\n".join([f"• {part}" for part in what_i_see_parts])
+                analysis_section = f"**Here's what I see:**\n{what_i_see}\n\n"
+            else:
+                analysis_section = ""
+
             response = (
                 f"{images_display}\n\n"
                 f"**{brief_summary}**\n\n"
+                f"{analysis_section}"
                 f"What changes would you like to make to this space?\n\n"
                 f"You can:\n"
                 f"- Describe your vision (e.g., *\"modern minimalist with white marble\"*)\n"

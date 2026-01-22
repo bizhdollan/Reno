@@ -39,9 +39,9 @@ export function ImageUploadPrompt({
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="w-full max-w-md mx-auto"
+      className="w-full max-w-md mx-auto pt-10"
     >
-      <div className="bg-white dark:bg-navy-800 rounded-2xl border border-navy-200 dark:border-navy-700 shadow-lg overflow-hidden">
+      <div className="bg-white  dark:bg-navy-800 rounded-2xl border border-navy-200 dark:border-navy-700 shadow-lg overflow-hidden">
         {/* Header */}
         <div className="px-5 py-4 border-b border-navy-100 dark:border-navy-700">
           <div className="flex items-center gap-3">

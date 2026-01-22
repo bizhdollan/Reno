@@ -1,0 +1,103 @@
+# Cursor IDE Rules for Reno Project
+
+## Core Development Principles
+
+### 1. MANDATORY ERROR HANDLING
+
+**CRITICAL**: Every piece of code MUST have proper error handling. This is non-negotiable.
+
+#### Backend (Python)
+- Wrap ALL async functions in try-except blocks
+- Log errors with `logger.error()` or `logger.exception()`
+- Use specific exceptions before generic `Exception`
+- Close database sessions in `finally` blocks
+- Return user-friendly error messages to frontend
+- Use built-in retry logic for LLM calls (LLMProvider has this built-in)
+
+Example:
+```python
+async def my_function():
+    try:
+        result = await operation()
+        return result
+    except SpecificError as e:
+        logger.error(f"[my_function] Error: {e}", exc_info=True)
+        raise CustomError("User-friendly message") from e
+    except Exception as e:
+        logger.exception(f"[my_function] Unexpected error")
+        raise
+```
+
+#### Frontend (TypeScript/React)
+- Wrap ALL API calls in try-catch blocks
+- Clear loading states in `finally` blocks
+- Manage and display error state
+- Use `APIError` class for type-safe error handling
+- Check error types: `isNetworkError`, `isTimeout`, `isServerError`, `isClientError`
+- Log errors to console for debugging
+
+Example:
+```typescript
+try {
+  setLoading(true);
+  setError(null);
+  const result = await api.call();
+} catch (error) {
+  if (error instanceof APIError) {
+    setError(error.message);
+  }
+  console.error('[Component] Error:', error);
+} finally {
+  setLoading(false);
+}
+```
+
+### 2. AI-DRIVEN ARCHITECTURE
+
+- NO hardcoded keywords for intent detection
+- Use LLM-based classification for all user intent
+- Implement proper retry logic for AI calls (already built into LLMProvider)
+- Handle AI failures gracefully with contextual defaults
+
+### 3. LOGGING STANDARDS
+
+- Include function/component name in log messages: `[function_name]`
+- Include operation context: what was being attempted
+- Use appropriate log levels:
+  - `logger.error()` - handled errors
+  - `logger.exception()` - errors with stack trace
+  - `logger.warning()` - non-critical issues
+  - `logger.info()` - expected error conditions
+
+### 4. CODE REVIEW CHECKLIST
+
+Before considering code complete, verify:
+- [ ] All async operations have error handling
+- [ ] All API calls have try-catch
+- [ ] Loading states cleared in finally blocks
+- [ ] Errors logged with context
+- [ ] User-friendly error messages
+- [ ] Database sessions closed properly
+- [ ] No silent failures (`except: pass`)
+
+### 5. TESTING ERROR PATHS
+
+Always test:
+- Network failures
+- Timeout scenarios
+- Invalid inputs
+- Server errors (500s)
+- Rate limiting
+- Missing resources (404s)
+
+## File References
+
+- Development Guidelines: `/DEVELOPMENT_GUIDELINES.md` (comprehensive guide)
+- Backend LLM Provider: `/backend/src/core/llm/provider.py`
+- Frontend API Client: `/frontend/src/lib/api.ts`
+
+## Remember
+
+**"If it can fail, it will fail. Handle it gracefully."**
+
+Error handling is core functionality, not optional.

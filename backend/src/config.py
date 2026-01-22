@@ -82,3 +82,32 @@ class VGMConfig:
 
 def get_vgm_config() -> VGMConfig:
     return VGMConfig.from_env()
+
+
+@dataclass
+class FastAnalysisConfig:
+    """Fast Analysis Model config - for quick Tavily content extraction (e.g., Cerebras)."""
+    provider: str
+    model: str
+    api_key: str
+
+    @classmethod
+    def from_env(cls) -> "FastAnalysisConfig":
+        provider = os.getenv("CEREBRAS_PROVIDER", "cerebras")
+        model = os.getenv("CEREBRAS_MODEL", "cerebras/gpt-oss-120b")
+        api_key = os.getenv("CEREBRAS_API_KEY")
+
+        # Fallback to LLM config if Cerebras not configured
+        if not api_key:
+            llm_config = LLMConfig.from_env()
+            return cls(
+                provider=llm_config.provider,
+                model=llm_config.model,
+                api_key=llm_config.api_key
+            )
+
+        return cls(provider=provider, model=model, api_key=api_key)
+
+
+def get_fast_analysis_config() -> FastAnalysisConfig:
+    return FastAnalysisConfig.from_env()

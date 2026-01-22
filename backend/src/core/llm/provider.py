@@ -6,7 +6,10 @@ import litellm
 from litellm import acompletion
 
 from src.core.logger import get_logger
-from src.config import get_llm_config, get_vlm_config, get_vgm_config, LLMConfig, VLMConfig, VGMConfig
+from src.config import (
+    get_llm_config, get_vlm_config, get_vgm_config, get_fast_analysis_config,
+    LLMConfig, VLMConfig, VGMConfig, FastAnalysisConfig
+)
 
 logger = get_logger(__name__)
 
@@ -38,31 +41,16 @@ def is_reasoning_model(model_name: str) -> bool:
 # =============================================================================
 MODEL_PRICING = {
     # OpenAI
-    "gpt-4o": {"input": 2.50, "output": 10.00},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "gpt-4-vision-preview": {"input": 10.00, "output": 30.00},
-    "gpt-4-turbo": {"input": 10.00, "output": 30.00},
-    "gpt-4": {"input": 30.00, "output": 60.00},
-    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
-
-    # Anthropic
-    "claude-3-opus-20240229": {"input": 15.00, "output": 75.00},
-    "claude-3-sonnet-20240229": {"input": 3.00, "output": 15.00},
-    "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
-    "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
+    "gpt-5-mini": {"input": 0.25, "output": 2.00},
 
     # Google Gemini
-    "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
-    "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
-    "gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},
-    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
-    "gemini/gemini-1.5-pro": {"input": 1.25, "output": 5.00},
-    "gemini/gemini-1.5-flash": {"input": 0.075, "output": 0.30},
-    "gemini/gemini-2.0-flash-exp": {"input": 0.075, "output": 0.30},
-    "gemini/gemini-2.5-flash-preview-05-20": {"input": 0.075, "output": 0.30},
+    
+    "gemini/gemini-2.5-flash-image": {"input": 0.3, "output": 0.039},
 
-    # Default fallback
-    "default": {"input": 1.00, "output": 2.00},
+    # Cerebras (fast inference)
+    "cerebras/gpt-oss-120b": {"input": 0.35, "output": 0.75},
+
 }
 
 
@@ -76,7 +64,7 @@ class LLMProviderError(Exception):
 
 class LLMProvider:
     """
-    Unified LLM provider using LiteLLM for OpenAI, Anthropic, and Gemini models.
+    Unified LLM provider using LiteLLM for OpenAI, Anthropic, Cerebras and Gemini models.
     
     Supports:
     - Text-only and multimodal (text + base64 images) completions
@@ -116,6 +104,8 @@ class LLMProvider:
             os.environ["ANTHROPIC_API_KEY"] = self.api_key
         elif provider_lower in ["gemini", "google"]:
             os.environ["GOOGLE_API_KEY"] = self.api_key
+        elif provider_lower == "cerebras":
+            os.environ["CEREBRAS_API_KEY"] = self.api_key
         else:
             os.environ["LLM_API_KEY"] = self.api_key
 
@@ -278,7 +268,7 @@ class LLMProvider:
 
         # Handle reasoning models (gpt-5, o1, o3, etc.) that don't support custom temperature
         completion_kwargs = {
-            "model": self.model,
+            "model": self.model, 
             "messages": messages,
             "max_tokens": max_tokens,
             "stream": False,
@@ -303,7 +293,41 @@ class LLMProvider:
                 response = await acompletion(**completion_kwargs)
 
                 # Extract the completion text
-                content = response.choices[0].message.content
+                # Handle different response structures from different providers
+                if not response:
+                    logger.error(f"[LLM] Response is None or empty")
+                    raise LLMProviderError("Empty response from API")
+
+                if not hasattr(response, 'choices') or response.choices is None:
+                    logger.error(f"[LLM] Response has no choices. Type: {type(response)}")
+                    logger.error(f"[LLM] Response attrs: {dir(response)}")
+                    raise LLMProviderError("Response has no choices attribute")
+
+                if len(response.choices) == 0:
+                    logger.error(f"[LLM] Response choices is empty. Model: {self.model}")
+                    raise LLMProviderError("Response choices list is empty")
+
+                choice = response.choices[0]
+                if not choice:
+                    logger.error(f"[LLM] First choice is None")
+                    raise LLMProviderError("First choice is None")
+
+                if not hasattr(choice, 'message'):
+                    logger.error(f"[LLM] Choice has no message. Choice attrs: {dir(choice)}")
+                    raise LLMProviderError("Choice has no message attribute")
+
+                content = choice.message.content
+
+                if content is None:
+                    finish_reason = getattr(choice, 'finish_reason', 'unknown')
+                    logger.error(f"[LLM] Response content is None. Finish reason: {finish_reason}")
+                    logger.error(f"[LLM] Message attrs: {dir(choice.message)}")
+
+                    # Check if it's a token limit issue
+                    if finish_reason == 'length':
+                        raise LLMProviderError("Response truncated due to token limit. Increase max_tokens.")
+
+                    raise LLMProviderError(f"Response content is None (finish_reason: {finish_reason})")
 
                 # Log token usage and cost if available
                 if hasattr(response, 'usage') and response.usage:
@@ -472,6 +496,27 @@ class LLMProvider:
     def for_vgm(cls, **overrides) -> "LLMProvider":
         """Create provider for Vision Generation Model (image generation)."""
         config = get_vgm_config()
+        return cls(
+            provider=overrides.get("provider", config.provider),
+            model=overrides.get("model", config.model),
+            api_key=overrides.get("api_key", config.api_key)
+        )
+
+    @classmethod
+    def for_fast_analysis(cls, **overrides) -> "LLMProvider":
+        """
+        Create provider for fast analysis tasks (Cerebras for Tavily content extraction).
+
+        Uses Cerebras by default for fast inference on structured data extraction.
+        Falls back to default LLM if Cerebras is not configured.
+
+        Example:
+            provider = LLMProvider.for_fast_analysis()
+            response = await provider.complete([
+                {"role": "user", "content": "Extract key facts from: ..."}
+            ])
+        """
+        config = get_fast_analysis_config()
         return cls(
             provider=overrides.get("provider", config.provider),
             model=overrides.get("model", config.model),
