@@ -1,11 +1,3 @@
-"""
-Image analysis functions for extracting data from images.
-
-OPTIMIZATION: This module now uses unified_analysis for single VLM call per image.
-Old approach: 6+ separate VLM calls per image ($0.028, 30+ seconds)
-New approach: 1 unified VLM call per image ($0.005, 5-8 seconds)
-"""
-
 import asyncio
 import json
 
@@ -13,16 +5,12 @@ from src.core.logger import get_logger
 from src.core.llm.provider import LLMProvider
 
 logger = get_logger(__name__)
+
 from src.core.langgraph.state import ImageAnalysis
 from src.core.langgraph.utils import parse_json
 from src.core.langgraph.config import (
     build_extraction_prompt_section,
     build_extraction_json_schema,
-    VISION_PROMPT,
-)
-from src.core.langgraph.prompts import (
-    BRIEF_ROOM_SUMMARY_PROMPT,
-    FEATURES_TO_RETAIN_PROMPT,
 )
 from src.core.langgraph.nodes.image_analysis_generation.image_helpers import (
     load_image_as_base64,
@@ -31,38 +19,11 @@ from src.core.services.event_broadcaster import (
     emit_analysis_progress,
     emit_analysis_complete,
 )
-from src.core.langgraph.nodes.image_analysis_generation.unified_analysis import (
-    unified_image_analysis,
+
+from src.core.langgraph.nodes.image_analysis_generation.comprehensive_analysis import (
+    comprehensive_image_analysis,
+    _convert_to_legacy_extracted_data,
 )
-
-
-def build_image_analysis_prompt(project_type: str) -> str:
-    """Build the full image analysis prompt with configured categories."""
-    categories_section = build_extraction_prompt_section()
-    json_schema = build_extraction_json_schema()
-
-    return f"""You are a renovation expert analyzing an image for a {project_type} renovation project.
-
-Analyze this image comprehensively and extract ALL renovation-relevant information.
-
-## What to Extract
-
-{categories_section}
-
-## Instructions
-
-- Only include categories where you can actually identify relevant items
-- Be specific and accurate in your descriptions
-- For measurements, provide estimates based on visual cues (doorways, standard fixture sizes, etc.)
-- Note the condition of items where visible (excellent, good, fair, poor)
-
-## Response Format
-
-Return JSON only with this structure:
-{json_schema}
-
-Only include categories where you found relevant items. Return valid JSON, no markdown."""
-
 
 CORRECTION_PROMPT = """You are helping update renovation extraction data based on user feedback.
 
@@ -123,13 +84,27 @@ async def analyze_single_image(
     """
     Analyze a single image and return structured analysis.
 
-    OPTIMIZED: Now uses unified_image_analysis for single VLM call.
-    Extracts all data in one call: room type, materials, fixtures, entities,
-    features to retain, structural elements, and contractor context.
-    """
-    logger.info(f"[image_analysis] Starting UNIFIED analysis for image {image_index + 1}: {image_url}")
+    REFACTORED: Uses comprehensive_image_analysis for a SINGLE VLM call.
+    Extracts ALL data in one call:
+    - Room type, materials, fixtures, entities
+    - Image scope, visible elements, must_not_add (for VGM)
+    - Features to retain, structural elements
+    - Contractor context, UI summary, confidence notes
 
-    # Emit progress event
+    Args:
+        image_url: URL of the image to analyze
+        project_type: Type of renovation project
+        image_index: Index of this image (0-based)
+        total_images: Total number of images being analyzed
+        project_id: Optional project ID for event broadcasting
+        project_title: Optional project title for context
+
+    Returns:
+        ImageAnalysis with analysis dict and comprehensive unified_data
+    """
+    logger.info(f"[image_analysis] Starting COMPREHENSIVE analysis for image {image_index + 1}: {image_url}")
+
+    # Emit progress event - loading image
     if project_id:
         await emit_analysis_progress(
             project_id=project_id,
@@ -139,37 +114,51 @@ async def analyze_single_image(
             details={"url": image_url}
         )
 
-    # Emit extraction start
+    # Emit progress event - extracting data
     if project_id:
         await emit_analysis_progress(
             project_id=project_id,
             image_index=image_index,
             total_images=total_images,
             step="extracting_data",
-            details={"categories": "unified_comprehensive_analysis"}
+            details={"categories": "comprehensive_single_vlm_analysis"}
         )
 
-    # Single unified VLM call replaces 6+ separate calls
-    unified_result = {}
+    # Single comprehensive VLM call - extracts EVERYTHING
+    comprehensive_result = {}
+    legacy_analysis = {}
+
     try:
-        unified_result = await unified_image_analysis(
+        comprehensive_result = await comprehensive_image_analysis(
             image_url=image_url,
             project_title=project_title,
             project_type=project_type
         )
 
-        # Convert unified result to legacy format for backward compatibility
-        analysis = _convert_unified_to_legacy_format(unified_result)
+        # Convert to legacy format for backward compatibility
+        legacy_analysis = _convert_to_legacy_extracted_data(comprehensive_result)
+
+        logger.info(f"[image_analysis] Comprehensive analysis successful for image {image_index + 1}")
 
     except Exception as e:
-        logger.error(f"[image_analysis] Unified analysis failed for image {image_index + 1}: {e}", exc_info=True)
-        analysis = {}
-        unified_result = {}  # Ensure unified_result is defined even on failure
+        logger.error(f"[image_analysis] Comprehensive analysis failed for image {image_index + 1}: {e}", exc_info=True)
+        comprehensive_result = {}
+        legacy_analysis = {}
 
-    categories_found = [k for k in analysis.keys() if analysis.get(k)]
-    logger.info(f"[image_analysis] Completed UNIFIED analysis for image {image_index + 1}: found {categories_found}")
+    # Log what was found
+    categories_found = [k for k in legacy_analysis.keys() if legacy_analysis.get(k)]
+    logger.info(f"[image_analysis] Completed analysis for image {image_index + 1}: found {categories_found}")
 
-    # Emit completion for this image
+    # Log VGM-critical data
+    if comprehensive_result:
+        image_scope = comprehensive_result.get("image_scope", {})
+        logger.info(f"[image_analysis] Image scope: {image_scope.get('frame_type')} "
+                    f"(~{image_scope.get('room_coverage_pct', 0)}% coverage)")
+        logger.info(f"[image_analysis] Must NOT add: {comprehensive_result.get('must_not_add', [])}")
+        logger.info(f"[image_analysis] Features to retain: {len(comprehensive_result.get('features_to_retain', []))} items")
+        logger.info(f"[image_analysis] Entities: {len(comprehensive_result.get('entities', []))} found")
+
+    # Emit completion event
     if project_id:
         await emit_analysis_progress(
             project_id=project_id,
@@ -182,89 +171,9 @@ async def analyze_single_image(
     return ImageAnalysis(
         url=image_url,
         index=image_index,
-        analysis=analysis,
-        unified_data=unified_result  # Store full unified data for future use
+        analysis=legacy_analysis,
+        unified_data=comprehensive_result  # Full comprehensive data for all downstream use
     )
-
-
-def _convert_unified_to_legacy_format(unified: dict) -> dict:
-    """
-    Convert unified analysis format to legacy format for backward compatibility.
-
-    Maps the new comprehensive schema to the old extraction format.
-    """
-    legacy = {}
-
-    # Materials
-    materials = []
-    if unified.get("floor"):
-        floor = unified["floor"]
-        materials.append({
-            "name": "Floor",
-            "type": floor.get("material", "Unknown"),
-            "finish": floor.get("color", ""),
-            "condition": floor.get("condition", "")
-        })
-    if unified.get("walls"):
-        walls = unified["walls"]
-        materials.append({
-            "name": "Walls",
-            "type": walls.get("material", "Unknown"),
-            "finish": walls.get("paint_color", ""),
-            "condition": walls.get("condition", "")
-        })
-    if materials:
-        legacy["materials"] = materials
-
-    # Measurements
-    if unified.get("dimensions"):
-        dim = unified["dimensions"]
-        legacy["measurements"] = {
-            "room_width_ft": dim.get("width_ft"),
-            "room_length_ft": dim.get("length_ft"),
-            "room_height_ft": dim.get("height_ft"),
-            "notes": f"Confidence: {dim.get('confidence', 'unknown')}"
-        }
-
-    # Fixtures
-    if unified.get("fixtures"):
-        legacy["fixtures"] = [
-            {
-                "name": f.get("type", "Unknown"),
-                "type": f.get("type", "Unknown"),
-                "condition": f.get("condition", ""),
-                "style": f.get("brand", "")
-            }
-            for f in unified["fixtures"]
-        ]
-
-    # Appliances
-    if unified.get("appliances"):
-        legacy["appliances"] = [
-            {
-                "name": a.get("type", "Unknown"),
-                "type": a.get("type", "Unknown"),
-                "brand": a.get("brand", "")
-            }
-            for a in unified["appliances"]
-        ]
-
-    # Style
-    if unified.get("style"):
-        legacy["style"] = {
-            "overall_style": unified["style"].get("primary_style", ""),
-            "condition": unified["style"].get("overall_condition", "")
-        }
-
-    # Store entities and features for later use
-    if unified.get("entities"):
-        legacy["entities"] = unified["entities"]
-    if unified.get("features_to_retain"):
-        legacy["features_to_retain"] = unified["features_to_retain"]
-    if unified.get("contractor_context"):
-        legacy["search_context"] = unified["contractor_context"]
-
-    return legacy
 
 
 async def analyze_images_parallel(
@@ -276,9 +185,20 @@ async def analyze_images_parallel(
     """
     Analyze multiple images in parallel.
 
-    OPTIMIZED: Each image analyzed with single unified VLM call.
+    REFACTORED: Each image analyzed with single comprehensive VLM call.
+
+    Args:
+        image_urls: List of image URLs to analyze
+        project_type: Type of renovation project
+        project_id: Optional project ID for event broadcasting
+        project_title: Optional project title for context
+
+    Returns:
+        List of ImageAnalysis objects sorted by index
     """
     total_images = len(image_urls)
+    logger.info(f"[image_analysis] Starting parallel analysis of {total_images} images")
+
     tasks = [
         analyze_single_image(
             image_url=url,
@@ -290,6 +210,7 @@ async def analyze_images_parallel(
         )
         for idx, url in enumerate(image_urls)
     ]
+
     results = await asyncio.gather(*tasks)
     return sorted(results, key=lambda x: x["index"])
 
@@ -310,7 +231,7 @@ def format_extracted_data_for_display(extracted_data: dict, image_analyses: list
     # Materials
     materials = extracted_data.get("materials", [])
     if materials:
-        lines.append("### 🧱 Materials\n")
+        lines.append("### Materials\n")
         for m in materials:
             line = f"- **{m.get('name', 'Unknown')}**: {m.get('type', 'N/A')}"
             if m.get('finish'):
@@ -320,24 +241,13 @@ def format_extracted_data_for_display(extracted_data: dict, image_analyses: list
             lines.append(line)
         lines.append("")
 
-    # Measurements
-    measurements = extracted_data.get("measurements", {})
-    if measurements:
-        lines.append("### 📐 Measurements\n")
-        if measurements.get("room_width_ft") and measurements.get("room_length_ft"):
-            lines.append(f"- **Room Size**: {measurements.get('room_width_ft')} × {measurements.get('room_length_ft')} ft")
-        if measurements.get("room_height_ft"):
-            lines.append(f"- **Ceiling Height**: {measurements.get('room_height_ft')} ft")
-        if measurements.get("area_sqft"):
-            lines.append(f"- **Total Area**: {measurements.get('area_sqft')} sq ft")
-        if measurements.get("notes"):
-            lines.append(f"- *Note: {measurements.get('notes')}*")
-        lines.append("")
+    # Note: Measurements removed - user provides manually via canvas UI
+    # measurements = extracted_data.get("measurements", {})
 
     # Colors
     colors = extracted_data.get("colors", [])
     if colors:
-        lines.append("### 🎨 Colors\n")
+        lines.append("### Colors\n")
         for c in colors:
             line = f"- **{c.get('element', 'Unknown')}**: {c.get('color', 'N/A')}"
             if c.get('finish'):
@@ -348,7 +258,7 @@ def format_extracted_data_for_display(extracted_data: dict, image_analyses: list
     # Fixtures
     fixtures = extracted_data.get("fixtures", [])
     if fixtures:
-        lines.append("### 💡 Fixtures\n")
+        lines.append("### Fixtures\n")
         for f in fixtures:
             line = f"- **{f.get('name', 'Unknown')}**: {f.get('type', 'N/A')}"
             if f.get('style'):
@@ -361,7 +271,7 @@ def format_extracted_data_for_display(extracted_data: dict, image_analyses: list
     # Appliances
     appliances = extracted_data.get("appliances", [])
     if appliances:
-        lines.append("### 🔌 Appliances\n")
+        lines.append("### Appliances\n")
         for a in appliances:
             line = f"- **{a.get('name', 'Unknown')}**: {a.get('type', 'N/A')}"
             if a.get('brand'):
@@ -372,13 +282,11 @@ def format_extracted_data_for_display(extracted_data: dict, image_analyses: list
     # Style
     style = extracted_data.get("style", {})
     if style:
-        lines.append("### 🏠 Style Assessment\n")
+        lines.append("### Style Assessment\n")
         if style.get("overall_style"):
             lines.append(f"- **Overall Style**: {style['overall_style']}")
         if style.get("condition"):
             lines.append(f"- **Current Condition**: {style['condition']}")
-        if style.get("age_estimate"):
-            lines.append(f"- **Estimated Age**: {style['age_estimate']}")
         lines.append("")
 
     return "\n".join(lines)
@@ -389,7 +297,17 @@ async def apply_user_correction(
     user_message: str,
     project_type: str
 ) -> dict:
-    """Use AI to apply user's correction to extracted data."""
+    """
+    Use AI to apply user's correction to extracted data.
+
+    Args:
+        current_data: Current extracted data dict
+        user_message: User's correction message
+        project_type: Type of renovation project
+
+    Returns:
+        Updated extracted data dict
+    """
     provider = LLMProvider.for_llm()
 
     current_data_str = json.dumps(current_data, indent=2)
@@ -410,7 +328,8 @@ async def apply_user_correction(
             {"role": "user", "content": prompt}
         ],
         temperature=0.1,
-        max_tokens=2000
+        max_tokens=5000,
+        operation_type="user_correction"
     )
 
     try:
@@ -425,7 +344,17 @@ async def analyze_vision_input(
     project_type: str,
     current_details: str
 ) -> dict:
-    """Analyze user's vision input and determine if clarification needed."""
+    """
+    Analyze user's vision input and determine if clarification needed.
+
+    Args:
+        user_vision: User's description of their renovation vision
+        project_type: Type of renovation project
+        current_details: Current extracted details as string
+
+    Returns:
+        Dict with is_clear, summary, followup_questions, parsed_vision
+    """
     provider = LLMProvider.for_llm()
 
     prompt = VISION_CLARIFICATION_PROMPT.format(
@@ -443,7 +372,8 @@ async def analyze_vision_input(
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
-        max_tokens=800
+        max_tokens=2000,
+        operation_type="vision_analysis"
     )
 
     try:
@@ -456,162 +386,3 @@ async def analyze_vision_input(
             "parsed_vision": {"additional_notes": user_vision}
         }
 
-
-async def generate_brief_room_summary(
-    image_url: str,
-    project_type: str,
-    extracted_data: dict
-) -> dict:
-    """
-    Generate a brief, conversational summary of the room for user interaction.
-
-    Returns:
-        dict with keys: brief_summary, room_vibe
-    """
-    provider = LLMProvider.for_vlm()
-    image_data_url = await load_image_as_base64(image_url)
-
-    prompt = BRIEF_ROOM_SUMMARY_PROMPT.format(
-        project_type=project_type,
-        extracted_data=json.dumps(extracted_data, indent=2)[:500] if extracted_data else "{}"
-    )
-
-    response = await provider.complete(
-        messages=[
-            {
-                "role": "system",
-                "content": "You describe rooms in a conversational, friendly way. Return JSON only."
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_data_url}}
-                ]
-            }
-        ],
-        temperature=0.3,
-        max_tokens=300
-    )
-
-    try:
-        return parse_json(response)
-    except:
-        return {
-            "brief_summary": f"A {project_type} space ready for renovation.",
-            "room_vibe": "current"
-        }
-
-
-async def detect_features_to_retain(image_url: str) -> dict:
-    """
-    Analyze image to identify what's ACTUALLY VISIBLE and what should NOT be added.
-
-    This is CRITICAL for preventing VGM hallucination. The function returns:
-    - visible_elements: What's actually in the image (walls, floor, windows, doors, etc.)
-    - image_scope: Frame type (corner_view, wall_view, full_room), coverage percentage
-    - must_retain: Structural features to preserve
-    - must_not_add: Explicit list of things NOT to add during generation
-
-    Returns:
-        dict with keys: visible_elements, image_scope, must_retain, must_not_add, reasoning
-    """
-    provider = LLMProvider.for_vlm()
-    image_data_url = await load_image_as_base64(image_url)
-
-    response = await provider.complete(
-        messages=[
-            {
-                "role": "system",
-                "content": """You are an image analyst for renovation projects. Your task is to identify:
-1. What is ACTUALLY VISIBLE in this specific image frame
-2. What is NOT visible (and therefore should NOT be added during renovation)
-3. The scope/coverage of the image (corner view, partial wall, full room, etc.)
-
-Be CONSERVATIVE - if you cannot clearly see something, assume it's NOT there.
-Do NOT imagine or assume elements that might exist outside the visible frame.
-Return valid JSON only, no markdown."""
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": FEATURES_TO_RETAIN_PROMPT},
-                    {"type": "image_url", "image_url": {"url": image_data_url}}
-                ]
-            }
-        ],
-        temperature=0.2,
-        max_tokens=800  # Increased for more detailed response
-    )
-
-    try:
-        result = parse_json(response)
-
-        # Ensure all expected fields are present
-        if "visible_elements" not in result:
-            result["visible_elements"] = {}
-        if "image_scope" not in result:
-            result["image_scope"] = {
-                "frame_type": "full_room",
-                "room_coverage_pct": 100,
-                "camera_angle": "eye_level"
-            }
-        if "must_retain" not in result:
-            # Fallback to old format if present
-            result["must_retain"] = result.get("must_retain_features", [])
-        if "must_not_add" not in result:
-            # Generate default must_not_add based on visible_elements
-            result["must_not_add"] = _generate_default_must_not_add(result.get("visible_elements", {}))
-
-        logger.info(f"[features_detection] Scope: {result.get('image_scope', {}).get('frame_type', 'unknown')}")
-        logger.info(f"[features_detection] Must retain: {len(result.get('must_retain', []))} items")
-        logger.info(f"[features_detection] Must NOT add: {result.get('must_not_add', [])}")
-
-        return result
-    except Exception as e:
-        logger.info(f"[features_detection] Failed to parse response: {e}")
-        return {
-            "visible_elements": {},
-            "image_scope": {
-                "frame_type": "full_room",
-                "room_coverage_pct": 100,
-                "camera_angle": "eye_level"
-            },
-            "must_retain": [],
-            "must_not_add": [
-                "Do not add windows that don't exist in the original",
-                "Do not add furniture unless specifically requested",
-                "Do not add doors that don't exist in the original"
-            ],
-            "reasoning": "Unable to detect features - using safe defaults"
-        }
-
-
-def _generate_default_must_not_add(visible_elements: dict) -> list[str]:
-    """Generate must_not_add list based on what's NOT visible in visible_elements."""
-    must_not_add = []
-
-    # Check windows
-    windows = visible_elements.get("windows", "")
-    if not windows or "no windows" in str(windows).lower() or "none" in str(windows).lower():
-        must_not_add.append("Do not add windows (none visible in original)")
-
-    # Check doors
-    doors = visible_elements.get("doors", "")
-    if not doors or "no doors" in str(doors).lower() or "none" in str(doors).lower():
-        must_not_add.append("Do not add doors (none visible in original)")
-
-    # Check furniture
-    furniture = visible_elements.get("furniture", "")
-    if not furniture or "no furniture" in str(furniture).lower() or "none" in str(furniture).lower():
-        must_not_add.append("Do not add furniture, beds, or couches (none visible in original)")
-
-    # Check fixtures
-    fixtures = visible_elements.get("fixtures", "")
-    if not fixtures or "none" in str(fixtures).lower():
-        must_not_add.append("Do not add light fixtures (none visible in original)")
-
-    # Always include frame constraint
-    must_not_add.append("Do not expand beyond the visible frame of the original image")
-
-    return must_not_add

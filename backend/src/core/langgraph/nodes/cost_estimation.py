@@ -154,7 +154,7 @@ async def generate_cost_tiers(state: ProjectState) -> list[CostTier]:
             {"role": "user", "content": prompt}
         ],
         temperature=0.3,
-        max_tokens=3000,
+        max_tokens=5000,
         operation_type="cost_estimation"
     )
 

@@ -1,117 +1,52 @@
-import { useState, useCallback, useRef } from "react";
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1";
+import { useState, useCallback, useEffect } from "react";
 
 export interface DetectedEntity {
   type: string;
   label: string;
   confidence: number;
+  category?: string;
+  location?: string;
+  removable?: boolean;
 }
 
 interface UseEntityDetectionResult {
   entities: DetectedEntity[];
   isLoading: boolean;
   error: string | null;
-  detectEntities: (imageUrl: string, projectId?: string) => Promise<void>;
+  setEntitiesFromState: (entities: DetectedEntity[]) => void;
   clearEntities: () => void;
 }
 
-// Convert image URL to base64 data URL
-async function imageUrlToBase64(url: string): Promise<string> {
-  // If already a data URL, return as-is
-  if (url.startsWith("data:")) {
-    return url;
-  }
-
-  try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image: ${response.status}`);
-    }
-
-    const blob = await response.blob();
-
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === "string") {
-          resolve(reader.result);
-        } else {
-          reject(new Error("Failed to convert to base64"));
-        }
-      };
-      reader.onerror = () => reject(new Error("FileReader error"));
-      reader.readAsDataURL(blob);
-    });
-  } catch (err) {
-    console.error("[imageUrlToBase64] Error:", err);
-    throw err;
-  }
-}
-
+/**
+ * Hook for managing detected entities from image analysis.
+ *
+ * UPDATED: Entities are now extracted from comprehensive image analysis
+ * during the chat flow, NOT from a separate API call.
+ *
+ * Usage:
+ *   const { entities, setEntitiesFromState, clearEntities } = useEntityDetection();
+ *
+ *   // When projectState updates with image_analyses:
+ *   useEffect(() => {
+ *     const analysisEntities = projectState?.image_analyses?.[0]?.unified_data?.entities;
+ *     if (analysisEntities) {
+ *       setEntitiesFromState(analysisEntities);
+ *     }
+ *   }, [projectState?.image_analyses]);
+ */
 export function useEntityDetection(): UseEntityDetectionResult {
   const [entities, setEntities] = useState<DetectedEntity[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Cache to avoid repeated API calls for same image
-  const cacheRef = useRef<Map<string, DetectedEntity[]>>(new Map());
-
-  const detectEntities = useCallback(async (imageUrl: string, projectId?: string) => {
-    if (!imageUrl) {
-      setError("No image URL provided");
-      return;
-    }
-
-    // Check cache first
-    const cacheKey = imageUrl;
-    if (cacheRef.current.has(cacheKey)) {
-      setEntities(cacheRef.current.get(cacheKey)!);
-      return;
-    }
-
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      // Convert URL to base64 data URL
-      const base64Image = await imageUrlToBase64(imageUrl);
-
-      const response = await fetch(`${API_BASE}/detect-entities`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          image_url: base64Image,
-          project_id: projectId,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: "Detection failed" }));
-        throw new Error(errorData.detail || "Failed to detect entities");
-      }
-
-      const data = await response.json();
-      const detectedEntities = data.entities || [];
-
-      // Cache the result
-      cacheRef.current.set(cacheKey, detectedEntities);
-      setEntities(detectedEntities);
-    } catch (err) {
-      console.error("[useEntityDetection] Error:", err);
-      setError(err instanceof Error ? err.message : "Failed to detect entities");
-      // Set default entities on error
-      const defaultEntities = [
-        { type: "floor", label: "Floor", confidence: 0.8 },
-        { type: "walls", label: "Walls", confidence: 0.8 },
-        { type: "ceiling", label: "Ceiling", confidence: 0.8 },
-        { type: "window", label: "Windows", confidence: 0.7 },
-      ];
-      setEntities(defaultEntities);
-    } finally {
-      setIsLoading(false);
+  /**
+   * Set entities from project state (from comprehensive analysis).
+   * This replaces the old API-based detection.
+   */
+  const setEntitiesFromState = useCallback((stateEntities: DetectedEntity[]) => {
+    if (stateEntities && Array.isArray(stateEntities)) {
+      setEntities(stateEntities);
+      setError(null);
     }
   }, []);
 
@@ -124,9 +59,136 @@ export function useEntityDetection(): UseEntityDetectionResult {
     entities,
     isLoading,
     error,
-    detectEntities,
+    setEntitiesFromState,
     clearEntities,
   };
+}
+
+/**
+ * Helper to extract entities from project state.
+ * Call this when projectState.image_analyses updates.
+ */
+export function extractEntitiesFromState(projectState: any): DetectedEntity[] {
+  if (!projectState?.image_analyses?.length) {
+    return getDefaultEntities();
+  }
+
+  // Get entities from the first (primary) image analysis
+  const primaryAnalysis = projectState.image_analyses[0];
+  const unifiedData = primaryAnalysis?.unified_data;
+
+  if (unifiedData?.entities && Array.isArray(unifiedData.entities)) {
+    return unifiedData.entities.map((e: any) => ({
+      type: e.type || "unknown",
+      label: e.label || e.type || "Unknown",
+      confidence: e.confidence || 0.8,
+      category: e.category,
+      location: e.location,
+      removable: e.removable,
+    }));
+  }
+
+  // Fallback: generate basic entities from what's visible
+  return generateEntitiesFromUnifiedData(unifiedData);
+}
+
+/**
+ * Generate entities from unified_data when explicit entities aren't available.
+ */
+function generateEntitiesFromUnifiedData(unifiedData: any): DetectedEntity[] {
+  if (!unifiedData) {
+    return getDefaultEntities();
+  }
+
+  const entities: DetectedEntity[] = [];
+
+  // Floor
+  if (unifiedData.floor?.material && unifiedData.floor.material !== "unknown") {
+    entities.push({
+      type: "floor",
+      label: `Floor (${unifiedData.floor.material})`,
+      confidence: 0.9,
+      category: "surface",
+      removable: false,
+    });
+  }
+
+  // Walls
+  if (unifiedData.walls?.material && unifiedData.walls.material !== "unknown") {
+    entities.push({
+      type: "walls",
+      label: `Walls (${unifiedData.walls.paint_color || unifiedData.walls.material})`,
+      confidence: 0.9,
+      category: "surface",
+      removable: false,
+    });
+  }
+
+  // Ceiling
+  if (unifiedData.ceiling?.material && unifiedData.ceiling.material !== "unknown") {
+    entities.push({
+      type: "ceiling",
+      label: "Ceiling",
+      confidence: 0.85,
+      category: "surface",
+      removable: false,
+    });
+  }
+
+  // Windows
+  const windows = unifiedData.structural_elements?.windows;
+  if (windows && windows.length > 0) {
+    entities.push({
+      type: "window",
+      label: `Windows (${windows.length})`,
+      confidence: 0.9,
+      category: "structural",
+      removable: false,
+    });
+  }
+
+  // Doors
+  const doors = unifiedData.structural_elements?.doors;
+  if (doors && doors.length > 0) {
+    entities.push({
+      type: "door",
+      label: `Doors (${doors.length})`,
+      confidence: 0.9,
+      category: "structural",
+      removable: false,
+    });
+  }
+
+  // Fixtures
+  if (unifiedData.fixtures?.length > 0) {
+    for (const fixture of unifiedData.fixtures.slice(0, 3)) {
+      entities.push({
+        type: fixture.type || "fixture",
+        label: fixture.type || "Fixture",
+        confidence: 0.8,
+        category: "fixture",
+        removable: true,
+      });
+    }
+  }
+
+  // If we didn't find anything, return defaults
+  if (entities.length === 0) {
+    return getDefaultEntities();
+  }
+
+  return entities;
+}
+
+/**
+ * Default entities when nothing can be extracted.
+ */
+function getDefaultEntities(): DetectedEntity[] {
+  return [
+    { type: "floor", label: "Floor", confidence: 0.8, category: "surface", removable: false },
+    { type: "walls", label: "Walls", confidence: 0.8, category: "surface", removable: false },
+    { type: "ceiling", label: "Ceiling", confidence: 0.7, category: "surface", removable: false },
+  ];
 }
 
 export default useEntityDetection;

@@ -39,8 +39,8 @@ from src.core.langgraph.nodes.image_analysis_generation.analysis import (
     analyze_images_parallel,
     format_extracted_data_for_display,
     apply_user_correction,
-    generate_brief_room_summary,
-    detect_features_to_retain,
+    # generate_brief_room_summary,
+    # detect_features_to_retain,
 )
 
 # Smart search integration
@@ -71,6 +71,167 @@ class ImageSubState(str, Enum):
 IMAGE_GENERATION_TIMEOUT = 90.0  # 90 seconds for image generation operations
 INSPIRATION_WAIT_TIMEOUT = 45.0  # 45 seconds max wait for inspirations (smart search takes ~35-40s)
 INSPIRATION_RETRY_INTERVAL = 3.0  # Check every 3 seconds
+
+
+def format_detailed_analysis_response(unified_data: dict, project_type: str) -> str:
+    """
+    Format a detailed analysis response from comprehensive analysis data.
+
+    Shows the user:
+    - Summary description
+    - Room type and style
+    - Confident observations
+    - Assumptions made
+    - What's not visible/uncertain
+    - Detected issues
+
+    Args:
+        unified_data: The comprehensive analysis result from comprehensive_image_analysis()
+        project_type: Type of renovation project
+
+    Returns:
+        Formatted markdown string for user display
+    """
+    sections = []
+
+    # === SUMMARY ===
+    summary_data = unified_data.get("summary", {})
+    brief_description = summary_data.get("brief_description", f"A {project_type} space.")
+    room_vibe = summary_data.get("room_vibe", "")
+
+    sections.append(f"**{brief_description}**")
+
+    # === ROOM DETAILS ===
+    room_type = unified_data.get("room_type", "unknown")
+    room_subtype = unified_data.get("room_subtype")
+    style = unified_data.get("style", {})
+    primary_style = style.get("primary_style", "")
+    overall_condition = style.get("overall_condition", "")
+
+    details_parts = []
+    room_label = room_subtype.replace("_", " ").title() if room_subtype else room_type.replace("_", " ").title()
+    details_parts.append(f"**Room:** {room_label}")
+
+    if primary_style and primary_style != "unknown":
+        details_parts.append(f"**Style:** {primary_style.replace('_', ' ').title()}")
+
+    if overall_condition and overall_condition != "unknown":
+        condition_display = overall_condition.replace("_", " ").title()
+        details_parts.append(f"**Condition:** {condition_display}")
+
+    if room_vibe and room_vibe not in ["unknown", "neutral"]:
+        details_parts.append(f"**Vibe:** {room_vibe.title()}")
+
+    if details_parts:
+        sections.append("\n### Room Overview\n" + " · ".join(details_parts))
+
+    # === CONFIDENCE NOTES ===
+    confidence_notes = unified_data.get("confidence_notes", {})
+
+    # Confident observations
+    clearly_visible = confidence_notes.get("clearly_visible", [])
+    if clearly_visible:
+        visible_list = "\n".join([f"- {item}" for item in clearly_visible[:8]])
+        sections.append(f"\n### ✓ Confident Observations\n{visible_list}")
+
+    # Assumptions made
+    assumptions = confidence_notes.get("assumptions_made", [])
+    if assumptions:
+        assumptions_list = "\n".join([f"- {item}" for item in assumptions[:5]])
+        sections.append(f"\n### ⚠ Assumptions Made\n{assumptions_list}")
+
+    # Not visible / uncertain
+    not_visible = confidence_notes.get("not_visible", [])
+    partially_visible = confidence_notes.get("partially_visible", [])
+    uncertain_items = not_visible + partially_visible
+    if uncertain_items:
+        uncertain_list = "\n".join([f"- {item}" for item in uncertain_items[:6]])
+        sections.append(f"\n### ❓ Not Fully Visible\n{uncertain_list}")
+
+    # === DETECTED ISSUES ===
+    visible_issues = unified_data.get("visible_issues", [])
+    if visible_issues:
+        issues_parts = []
+        for issue in visible_issues[:5]:
+            issue_type = issue.get("type", "issue").replace("_", " ").title()
+            location = issue.get("location", "")
+            severity = issue.get("severity", "")
+            issue_str = f"- **{issue_type}**"
+            if location:
+                issue_str += f" at {location}"
+            if severity:
+                issue_str += f" ({severity})"
+            issues_parts.append(issue_str)
+        if issues_parts:
+            sections.append(f"\n### 🔧 Issues Detected\n" + "\n".join(issues_parts))
+
+    # === ESTIMATED DIMENSIONS ===
+    estimated_dims = unified_data.get("estimated_dimensions", {})
+    room_dims = estimated_dims.get("room", {})
+
+    # Only show dimensions if we have some estimates with reasonable confidence
+    if room_dims.get("confidence", 0) >= 0.3:
+        dim_parts = []
+        if room_dims.get("width_ft") and room_dims.get("length_ft"):
+            dim_parts.append(f"**Room Size:** ~{room_dims['width_ft']}' × {room_dims['length_ft']}'")
+        if room_dims.get("area_sqft"):
+            dim_parts.append(f"**Area:** ~{room_dims['area_sqft']} sq ft")
+        if room_dims.get("height_ft"):
+            dim_parts.append(f"**Ceiling Height:** ~{room_dims['height_ft']} ft")
+
+        if dim_parts:
+            confidence_pct = int(room_dims.get("confidence", 0) * 100)
+            visual_cues = room_dims.get("visual_cues_used", [])
+            cue_note = f" (based on: {', '.join(visual_cues[:2])})" if visual_cues else ""
+            sections.append(f"\n### 📐 Estimated Dimensions ({confidence_pct}% confidence){cue_note}\n" + "\n".join([f"- {p}" for p in dim_parts]))
+
+    # === MATERIALS SUMMARY ===
+    floor = unified_data.get("floor", {})
+    walls = unified_data.get("walls", {})
+    materials_parts = []
+
+    if floor.get("material") and floor.get("material") != "unknown":
+        floor_desc = f"{floor.get('color', '')} {floor.get('material', '')}".strip()
+        if floor.get("condition") and floor.get("condition") != "unknown":
+            floor_desc += f" ({floor.get('condition')})"
+        if floor.get("estimated_sqft"):
+            floor_desc += f" (~{floor['estimated_sqft']} sq ft)"
+        materials_parts.append(f"**Floor:** {floor_desc}")
+
+    if walls.get("material") and walls.get("material") != "unknown":
+        wall_desc = f"{walls.get('paint_color', '')} {walls.get('material', '')}".strip()
+        if walls.get("condition") and walls.get("condition") != "unknown":
+            wall_desc += f" ({walls.get('condition')})"
+        materials_parts.append(f"**Walls:** {wall_desc}")
+
+    if materials_parts:
+        sections.append("\n### Materials\n" + "\n".join([f"- {p}" for p in materials_parts]))
+
+    # === POTENTIAL HAZARDS ===
+    hazards = unified_data.get("potential_hazards", [])
+    if hazards:
+        hazard_parts = []
+        for hazard in hazards[:3]:
+            hazard_type = hazard.get("hazard_type", "").replace("_", " ").title()
+            indicator = hazard.get("indicator", "")
+            recommendation = hazard.get("recommendation", "")
+            hazard_str = f"- **{hazard_type}**: {indicator}"
+            if recommendation:
+                hazard_str += f"\n  - {recommendation}"
+            hazard_parts.append(hazard_str)
+        if hazard_parts:
+            sections.append(f"\n### ⚠️ Potential Hazards\n" + "\n".join(hazard_parts))
+
+    # === IMAGE SCOPE NOTE ===
+    image_scope = unified_data.get("image_scope", {})
+    frame_type = image_scope.get("frame_type", "")
+    coverage_pct = image_scope.get("room_coverage_pct", 100)
+
+    if frame_type and coverage_pct < 80:
+        frame_display = frame_type.replace("_", " ")
+        sections.append(f"\n*Note: This image shows a {frame_display} (~{coverage_pct}% of room visible)*")
+
+    return "\n".join(sections)
 
 
 async def get_renovation_inspirations_with_wait(project_id_token: str, max_wait_seconds: float = INSPIRATION_WAIT_TIMEOUT) -> dict:
@@ -315,27 +476,16 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                 extracted_data = {}
                 updates["extracted_data"] = extracted_data
 
-            # Detect features to retain (parallel with summary generation)
-            primary_image_url = new_image_urls[0]
+            # Extract VGM-critical data from comprehensive analysis (already done in single VLM call)
+            # No separate VLM calls needed - all data is in unified_data from comprehensive_image_analysis
+            primary_analysis = image_analyses[0] if image_analyses else {}
+            unified_data = primary_analysis.get("unified_data", {})
 
-            # Run feature detection and brief summary in parallel
-            features_task = detect_features_to_retain(primary_image_url)
-            summary_task = generate_brief_room_summary(primary_image_url, project_type, extracted_data)
-
-            try:
-                features_result, summary_result = await asyncio.gather(features_task, summary_task)
-            except Exception as gather_error:
-                logger.error(f"[image_analysis] Failed to gather features/summary: {gather_error}", exc_info=True)
-                # Provide default values to continue gracefully
-                features_result = {"must_retain": [], "visible_elements": {}, "image_scope": {"frame_type": "full_room", "room_coverage_pct": 100}, "must_not_add": []}
-                summary_result = {"brief_summary": f"A {project_type} space.", "room_vibe": "current"}
-
-            # Store features to retain for later image generation
-            # NEW: Also extract visible_elements, image_scope, and must_not_add for hallucination prevention
-            features_to_retain = features_result.get("must_retain", features_result.get("must_retain_features", []))
-            visible_elements = features_result.get("visible_elements", {})
-            image_scope = features_result.get("image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
-            must_not_add = features_result.get("must_not_add", [])
+            # Extract features to retain and VGM constraints from comprehensive analysis
+            features_to_retain = unified_data.get("features_to_retain", [])
+            visible_elements = unified_data.get("visible_elements", {})
+            image_scope = unified_data.get("image_scope", {"frame_type": "full_room", "room_coverage_pct": 100})
+            must_not_add = unified_data.get("must_not_add", [])
 
             updates["original_features_to_retain"] = features_to_retain
             updates["_visible_elements"] = visible_elements
@@ -346,34 +496,21 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
             logger.info(f"[image_analysis] Image scope: {image_scope.get('frame_type')} (~{image_scope.get('room_coverage_pct')}%)")
             logger.info(f"[image_analysis] Must NOT add: {must_not_add}")
 
-            # Store brief summary
-            brief_summary = summary_result.get("brief_summary", f"A {project_type} space.")
-            room_vibe = summary_result.get("room_vibe", "current")
+            # Extract summary from comprehensive analysis
+            summary_data = unified_data.get("summary", {})
+            brief_summary = summary_data.get("brief_description", f"A {project_type} space.")
+            room_vibe = summary_data.get("room_vibe", "current")
             updates["brief_room_summary"] = brief_summary
 
-            # NEW: Store analysis in DB when services available
+            # NOTE: DB storage via services.image_analysis.analyze_image() has been removed
+            # because that method is deprecated (made redundant VLM calls).
+            # Analysis data is now stored in state via image_analyses[].unified_data
+            # If DB storage is needed, create a new store_analysis() method that
+            # accepts the already-extracted comprehensive analysis data.
             if use_services and services:
-                try:
-                    for img_data in image_analyses:
-                        img_url = img_data.get("url")
-                        analysis_dict = img_data.get("analysis", {})
-
-                        # Store in DB via service
-                        db_analysis = await services.image_analysis.analyze_image(
-                            image_url=img_url,
-                            project_id=services.project_id,
-                            project_type=project_type
-                        )
-
-                        # Set first analysis as active
-                        if not updates.get("active_image_id"):
-                            updates["active_image_id"] = str(db_analysis.id)
-
-                    # Update conversation phase
-                    updates["conversation_phase"] = "ideating"
-                    logger.info(f"[image_analysis] Stored {len(image_analyses)} analyses in DB")
-                except Exception as e:
-                    logger.info(f"[image_analysis] DB storage failed (continuing with state): {e}")
+                # Update conversation phase
+                updates["conversation_phase"] = "ideating"
+                logger.info(f"[image_analysis] Analysis complete for {len(image_analyses)} images (stored in state)")
 
             # Emit analysis_complete event for SSE streaming
             if project_id_for_events:
@@ -399,12 +536,16 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                     # Extract search insights from image analysis
                     search_insights = extract_search_insights(extracted_data)
 
-                    # Debug: Log the raw search_context data
+                    # Debug: Log the raw context data (check both keys)
+                    raw_contractor_context = extracted_data.get("contractor_context", {})
                     raw_search_context = extracted_data.get("search_context", {})
-                    logger.info(f"[image_analysis] DEBUG search_context raw: {raw_search_context}")
-                    logger.info(f"[image_analysis] DEBUG search_insights: era={search_insights.detected_era}, "
-                          f"style={search_insights.style_assessment}, problems={search_insights.problem_areas}, "
-                          f"scope={search_insights.renovation_scope}, materials={search_insights.material_indicators}")
+                    logger.info(f"[image_analysis] DEBUG contractor_context: {raw_contractor_context}")
+                    logger.info(f"[image_analysis] DEBUG search_context (legacy): {raw_search_context}")
+                    logger.info(f"[image_analysis] DEBUG search_insights extracted: "
+                          f"era={search_insights.detected_era}, style={search_insights.style_assessment}, "
+                          f"problems={search_insights.problem_areas}, scope={search_insights.renovation_scope}, "
+                          f"keywords={search_insights.search_keywords}, work_needed={search_insights.primary_work_needed}, "
+                          f"specialty={search_insights.specialty_required}")
 
                     if search_insights.has_useful_context():
                         logger.info(f"[image_analysis] 🎯 Extracted search insights: era={search_insights.detected_era}, "
@@ -421,9 +562,10 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                                         project_id=project.id,
                                         project_type=project_type,
                                         zip_code=zip_code,
-                                        search_insights=search_insights
+                                        search_insights=search_insights,
+                                        street_address=project.street_address,  # Use specific address if available
                                     )
-                                    logger.info(f"[image_analysis] 🚀 Started smart Tavily search for {project_type} in {zip_code}")
+                                    logger.info(f"[image_analysis] 🚀 Started smart Tavily search for {project_type} in {zip_code} (street_address: {bool(project.street_address)})")
                                 except Exception as search_error:
                                     logger.error(f"[image_analysis] Failed to start smart search: {search_error}", exc_info=True)
                                     # Emit context_ready so frontend isn't blocked
@@ -521,54 +663,15 @@ async def image_analysis_generation_node(state: ProjectState) -> dict:
                 )
             images_display = "\n".join(image_html_parts)
 
-            # Build "What I see" section from extracted data
-            what_i_see_parts = []
+            # Build detailed analysis section from comprehensive analysis
+            detailed_analysis = format_detailed_analysis_response(unified_data, project_type)
 
-            # Materials detected
-            materials = extracted_data.get("materials", [])
-            if materials:
-                material_items = [m.get("name", m.get("type", "unknown")) for m in materials[:5]]
-                if material_items:
-                    what_i_see_parts.append(f"**Materials:** {', '.join(material_items)}")
-
-            # Colors detected
-            colors = extracted_data.get("colors", [])
-            if colors:
-                color_items = []
-                for c in colors[:4]:
-                    element = c.get("element", "")
-                    color = c.get("color", "")
-                    if element and color:
-                        color_items.append(f"{color} {element.lower()}")
-                if color_items:
-                    what_i_see_parts.append(f"**Colors:** {', '.join(color_items)}")
-
-            # Features detected
-            features = extracted_data.get("features", [])
-            if features:
-                feature_names = [f.get("name", "") for f in features[:5] if f.get("name")]
-                if feature_names:
-                    what_i_see_parts.append(f"**Features:** {', '.join(feature_names)}")
-
-            # Measurements if available
-            measurements = extracted_data.get("measurements", {})
-            if measurements.get("room_width_ft") and measurements.get("room_length_ft"):
-                what_i_see_parts.append(
-                    f"**Estimated size:** ~{measurements.get('room_width_ft')}×{measurements.get('room_length_ft')} ft"
-                )
-
-            # Build the analysis section
-            if what_i_see_parts:
-                what_i_see = "\n".join([f"• {part}" for part in what_i_see_parts])
-                analysis_section = f"**Here's what I see:**\n{what_i_see}\n\n"
-            else:
-                analysis_section = ""
-
+            # Build the full response
             response = (
                 f"{images_display}\n\n"
-                f"**{brief_summary}**\n\n"
-                f"{analysis_section}"
-                f"What changes would you like to make to this space?\n\n"
+                f"{detailed_analysis}\n\n"
+                f"---\n\n"
+                f"**What changes would you like to make to this space?**\n\n"
                 f"You can:\n"
                 f"- Describe your vision (e.g., *\"modern minimalist with white marble\"*)\n"
                 f"- Ask for suggestions (e.g., *\"what would you recommend?\"*)\n"
@@ -801,55 +904,67 @@ async def _handle_design_conversation(
             return updates
 
         elif primary_intent == "ask_suggestions":
-            current_state_summary = json.dumps(extracted_data, indent=2)[:800]
-            user_prefs = renovation_vision.get("raw_input", "") if renovation_vision else ""
-
             # Retrieve renovation inspirations from database with wait logic
             project_id_token = state.get("project_id")
             logger.info(f"[design_conversation] Retrieving inspirations for {project_id_token}...")
             inspirations = await get_renovation_inspirations_with_wait(project_id_token)
 
-            if inspirations:
-                location = inspirations.get("location", {})
-                logger.info(f"[design_conversation] Using inspirations for {location.get('city', 'Unknown')}, {location.get('state_code', 'Unknown')}")
+            # Check if we have pre-generated suggestions
+            pre_generated = inspirations.get("suggestions", {}) if inspirations else {}
+            pre_generated_options = pre_generated.get("options", [])
+
+            if pre_generated_options:
+                # Use pre-generated suggestions (from background auto-generation)
+                logger.info(f"[design_conversation] Using {len(pre_generated_options)} pre-generated suggestions")
+                suggestions_options = pre_generated_options
+                suggestions_result = {"options": suggestions_options}
             else:
-                logger.info(f"[design_conversation] No inspirations available, generating generic suggestions")
+                # No pre-generated suggestions, generate on demand
+                logger.info(f"[design_conversation] No pre-generated suggestions, generating on demand...")
+                current_state_summary = json.dumps(extracted_data, indent=2)[:800]
+                user_prefs = renovation_vision.get("raw_input", "") if renovation_vision else ""
 
-            try:
-                suggestions_result = await generate_expert_suggestions(
-                    project_type=project_type,
-                    current_state_summary=current_state_summary,
-                    user_preferences=user_prefs,
-                    expertise_level=expertise_level,
-                    inspirations=inspirations
-                )
+                if inspirations:
+                    location = inspirations.get("location", {})
+                    logger.info(f"[design_conversation] Using inspirations for {location.get('city', 'Unknown')}, {location.get('state_code', 'Unknown')}")
+                else:
+                    logger.info(f"[design_conversation] No inspirations available, generating generic suggestions")
 
-                suggestions_options = suggestions_result.get("options", [])
-                updates["pending_suggestions"] = suggestions_options
-                # Store all suggestions permanently so user can switch between options later
-                updates["all_suggestions"] = suggestions_options
+                try:
+                    suggestions_result = await generate_expert_suggestions(
+                        project_type=project_type,
+                        current_state_summary=current_state_summary,
+                        user_preferences=user_prefs,
+                        expertise_level=expertise_level,
+                        inspirations=inspirations
+                    )
+                    suggestions_options = suggestions_result.get("options", [])
+                except LLMProviderError as llm_error:
+                    logger.error(f"[design_conversation] LLM provider error generating suggestions: {llm_error}", exc_info=True)
+                    response = "I'm having trouble generating suggestions right now. Could you tell me what style or changes you have in mind instead?"
+                    updates["messages"] = [{"role": "assistant", "content": response}]
+                    updates["awaiting_user_input"] = True
+                    return updates
+                except Exception as suggestions_error:
+                    logger.error(f"[design_conversation] Failed to generate suggestions: {suggestions_error}", exc_info=True)
+                    response = "I encountered an error generating suggestions. Please describe the style or changes you'd like to see, and I'll help visualize it."
+                    updates["messages"] = [{"role": "assistant", "content": response}]
+                    updates["awaiting_user_input"] = True
+                    return updates
 
-                # Return structured content for card rendering
-                response_content = [
-                    {"type": "text", "text": "# Renovation Options\n\nBased on your space and local design trends, here are my recommendations:"},
-                    _format_suggestions_as_cards(suggestions_result, inspirations),
-                    {"type": "text", "text": "\n\nSelect an option to see it visualized, or tell me if you have a different idea in mind!"}
-                ]
-                updates["messages"] = [{"role": "assistant", "content": response_content}]
-                updates["awaiting_user_input"] = True
-                return updates
-            except LLMProviderError as llm_error:
-                logger.error(f"[design_conversation] LLM provider error generating suggestions: {llm_error}", exc_info=True)
-                response = "I'm having trouble generating suggestions right now. Could you tell me what style or changes you have in mind instead?"
-                updates["messages"] = [{"role": "assistant", "content": response}]
-                updates["awaiting_user_input"] = True
-                return updates
-            except Exception as suggestions_error:
-                logger.error(f"[design_conversation] Failed to generate suggestions: {suggestions_error}", exc_info=True)
-                response = "I encountered an error generating suggestions. Please describe the style or changes you'd like to see, and I'll help visualize it."
-                updates["messages"] = [{"role": "assistant", "content": response}]
-                updates["awaiting_user_input"] = True
-                return updates
+            # Store suggestions in state
+            updates["pending_suggestions"] = suggestions_options
+            updates["all_suggestions"] = suggestions_options
+
+            # Return structured content for card rendering
+            response_content = [
+                {"type": "text", "text": "# Renovation Options\n\nBased on your space and local design trends, here are my recommendations:"},
+                _format_suggestions_as_cards(suggestions_result, inspirations),
+                {"type": "text", "text": "\n\nSelect an option to see it visualized, or tell me if you have a different idea in mind!"}
+            ]
+            updates["messages"] = [{"role": "assistant", "content": response_content}]
+            updates["awaiting_user_input"] = True
+            return updates
 
         elif primary_intent == "ask_question":
             try:

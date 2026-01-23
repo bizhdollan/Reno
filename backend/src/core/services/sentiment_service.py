@@ -222,7 +222,7 @@ class SentimentService:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.2,
-                max_tokens=200
+                max_tokens=512
             )
             data = parse_json(response)
             regions = data.get("regions", [])

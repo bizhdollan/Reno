@@ -87,12 +87,57 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
       }
 
       const data = await response.json();
+      console.log("[Geolocation] BigDataCloud response:", data);
+
       // Extract location data - capture as much as possible
       const zipCode = data.postcode || "";
       const city = data.city || data.locality || "";
-      const state = data.principalSubdivisionCode?.replace("US-", "") || data.principalSubdivision || "";
+      const state = data.principalSubdivisionCode?.replace("US-", "").replace("US-", "") || data.principalSubdivision || "";
       const country = data.countryCode || data.countryName || "";
       const county = data.localityInfo?.administrative?.find((a: any) => a.adminLevel === 6)?.name || "";
+
+      // Build the most specific location identifier from available fields
+      // Priority: street > neighbourhood > locality (if different from city) > plusCode
+      const locationParts: string[] = [];
+
+      // Check for street-level data (rare but possible)
+      if (data.houseNumber) locationParts.push(data.houseNumber);
+      if (data.street || data.streetName) locationParts.push(data.street || data.streetName);
+
+      // If no street, try neighbourhood
+      if (locationParts.length === 0 && data.neighbourhood) {
+        locationParts.push(data.neighbourhood);
+      }
+
+      // If still nothing, use locality if it's more specific than city (e.g., "Manhattan" vs "New York City")
+      if (locationParts.length === 0 && data.locality && data.locality !== city) {
+        locationParts.push(data.locality);
+      }
+
+      // Extract neighborhood from localityInfo.informative (often contains detailed area names)
+      if (locationParts.length === 0 && data.localityInfo?.informative) {
+        // Look for neighborhood-level info (usually has "order" around 6-8)
+        const neighborhoodInfo = data.localityInfo.informative.find(
+          (info: any) => info.order >= 6 && info.order <= 8 && info.name
+        );
+        if (neighborhoodInfo?.name && neighborhoodInfo.name !== city) {
+          locationParts.push(neighborhoodInfo.name);
+        }
+      }
+
+      // Build street address (most specific location we could find)
+      let streetAddress = locationParts.join(" ").trim() || undefined;
+
+      // Store plusCode separately - it's very precise but not human-readable for addresses
+      const plusCode = data.plusCode || undefined;
+
+      console.log("[Geolocation] Extracted location specifics:", {
+        streetAddress,
+        locality: data.locality,
+        neighbourhood: data.neighbourhood,
+        plusCode,
+        localityInfo: data.localityInfo?.informative?.slice(0, 3)
+      });
 
       if (!zipCode) {
         return null;
@@ -104,10 +149,12 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
         state,
         country,
         county,
+        streetAddress,
         latitude: lat,
         longitude: lng
       };
     } catch (error) {
+      console.error("[Geolocation] Reverse geocode error:", error);
       return null;
     }
   }, []);
@@ -180,6 +227,10 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
 
     setZipCode(detectedLocation.zipCode);
     setZipLocationInfo(`${detectedLocation.city}, ${detectedLocation.state}`);
+    // Also set street address if detected from geolocation
+    if (detectedLocation.streetAddress) {
+      setStreetAddress(detectedLocation.streetAddress);
+    }
     setLocationConfirmed(true);
     setZipValidated(true);
     setShowManualEntry(true);
@@ -324,22 +375,27 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
     const finalType = projectType === "other" ? customType : projectType;
 
     // Build comprehensive location data
+    // Use streetAddress from state (which may have been set from detected location), or fall back to detected
+    const finalStreetAddress = streetAddress.trim() || detectedLocation?.streetAddress || undefined;
+
     const locationData: LocationData = {
       zipCode: zipCode.trim(),
       city: detectedLocation?.city || zipLocationInfo?.split(",")[0]?.trim(),
       state: detectedLocation?.state || zipLocationInfo?.split(",")[1]?.trim(),
-      streetAddress: streetAddress.trim() || undefined,
+      streetAddress: finalStreetAddress,
       latitude: detectedLocation?.latitude,
       longitude: detectedLocation?.longitude,
       country: detectedLocation?.country,
       county: detectedLocation?.county,
     };
 
+    console.log("[ProjectBasicsForm] Submitting location data:", locationData);
+
     onSubmit({
       projectTitle: projectTitle.trim(),
       projectType: finalType.trim(),
       zipCode: zipCode.trim(),
-      streetAddress: streetAddress.trim() || undefined,
+      streetAddress: finalStreetAddress,
       location: locationData,
     });
   };
@@ -540,6 +596,9 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
                         Is this your location?
                       </p>
                       <p className="text-base font-semibold text-navy-900 dark:text-white mt-1">
+                        {detectedLocation.streetAddress && (
+                          <>{detectedLocation.streetAddress}, </>
+                        )}
                         {detectedLocation.city}, {detectedLocation.state} {detectedLocation.zipCode}
                       </p>
                     </div>
@@ -579,6 +638,7 @@ export function ProjectBasicsForm({ onSubmit, isLoading = false, initialData }: 
                       <div className="flex items-center gap-2">
                         <CheckCircle2 size={16} className="text-emerald-500" />
                         <span className="text-sm text-navy-700 dark:text-navy-300">
+                          {detectedLocation.streetAddress && `${detectedLocation.streetAddress}, `}
                           {detectedLocation.city}, {detectedLocation.state}
                         </span>
                       </div>

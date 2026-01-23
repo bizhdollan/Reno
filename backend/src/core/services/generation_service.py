@@ -279,7 +279,7 @@ class GenerationService:
                 }
             ],
             temperature=0.7,
-            max_tokens=1024
+            max_tokens=2000
         )
         return result
 

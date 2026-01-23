@@ -280,7 +280,8 @@ async def submit_project_basics(
     project.project_title = request.project_title
     project.project_type = request.project_type
     project.zip_code = request.zip_code
-    project.street_address = request.street_address
+    # Use top-level street_address, or fall back to location.street_address from geolocation
+    project.street_address = request.street_address or (request.location.street_address if request.location else None)
 
     # Store comprehensive location data if provided
     if request.location:
@@ -288,6 +289,9 @@ async def submit_project_basics(
         project.state = request.location.state
         project.county = request.location.county
         project.country = request.location.country or "US"
+        # Also use location.street_address if top-level is not set
+        if not project.street_address and request.location.street_address:
+            project.street_address = request.location.street_address
         if request.location.latitude:
             project.latitude = Decimal(str(request.location.latitude))
         if request.location.longitude:
@@ -374,7 +378,13 @@ async def submit_project_basics(
             request.location.longitude is not None
         )
         if has_geolocation:
-            logger.info(f"[basics] Using geolocation data (skipping ZIP lookup): {request.location.city}, {request.location.state}")
+            logger.info(f"[basics] Using geolocation data:")
+            logger.info(f"[basics]   street_address: {request.location.street_address or 'N/A'}")
+            logger.info(f"[basics]   city: {request.location.city}")
+            logger.info(f"[basics]   state: {request.location.state}")
+            logger.info(f"[basics]   county: {request.location.county or 'N/A'}")
+            logger.info(f"[basics]   zip_code: {request.location.zip_code}")
+            logger.info(f"[basics]   lat/lng: {request.location.latitude}, {request.location.longitude}")
             # Note: We still start prefetch for Census/Climate data, just log that we have geo data
 
     try:
@@ -400,3 +410,56 @@ async def submit_project_basics(
         message=f"Project basics saved. Ready for image upload.",
         state=conv_state.state
     )
+
+
+@router.get("/{token}/suggestions")
+async def get_pre_generated_suggestions(
+    token: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get pre-generated suggestions for a project.
+
+    Suggestions are auto-generated after Tavily + Cerebras extraction completes.
+    This endpoint retrieves them for display in the popup.
+
+    Args:
+        token: Project token (PRJ-XXXXXX)
+        db: Database session
+
+    Returns:
+        Dict with suggestions options, sources, and status
+    """
+    project = db.query(Project).filter(Project.token == token).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    inspirations = project.renovation_inspirations or {}
+    suggestions_data = inspirations.get("suggestions", {})
+
+    if not suggestions_data:
+        # Check if suggestions are still being generated
+        if inspirations.get("_tavily_pending"):
+            return {
+                "status": "pending",
+                "message": "Suggestions are still being generated",
+                "options": [],
+                "sources": []
+            }
+        return {
+            "status": "not_available",
+            "message": "No suggestions available yet",
+            "options": [],
+            "sources": []
+        }
+
+    options = suggestions_data.get("options", [])
+    sources = inspirations.get("_sources", [])
+
+    return {
+        "status": "ready",
+        "options": options,
+        "sources": sources,
+        "generated_at": suggestions_data.get("generated_at"),
+        "auto_generated": suggestions_data.get("auto_generated", False)
+    }

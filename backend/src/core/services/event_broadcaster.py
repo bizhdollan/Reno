@@ -227,6 +227,18 @@ async def emit_context_ready(project_id: str | UUID) -> None:
     })
 
 
+async def emit_suggestions_ready(
+    project_id: str | UUID,
+    suggestion_count: int
+) -> None:
+    """Emit event when pre-generated suggestions are ready."""
+    await broadcast(project_id, "suggestions_ready", {
+        "status": "ready",
+        "suggestion_count": suggestion_count,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+
 async def emit_error(project_id: str | UUID, error: str) -> None:
     """Emit error event."""
     await broadcast(project_id, "error", {

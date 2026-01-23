@@ -1,6 +1,3 @@
-"""Chat endpoint for LangGraph renovation flow."""
-
-import traceback
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Depends

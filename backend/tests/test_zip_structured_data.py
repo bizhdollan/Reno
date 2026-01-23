@@ -1,23 +1,4 @@
-#!/usr/bin/env python3
-"""
-zip_structured_data.py
 
-Library-style module (no CLI/argparse). One-call main().
-
-Call:
-  from zip_structured_data import main
-  result = main("90210", year=2023)
-  print(result)
-
-What it does (free):
-1) ZIP -> place info via Zippopotam.us (city/state/lat/lon)
-2) ZIP (treated as ZCTA) -> US Census ACS 5-year structured signals
-   - with automatic DNS fallback using: nslookup + curl --resolve
-3) Derives renovation / interior-design insights:
-   - owner/renter %
-   - housing age bucket %
-   - heuristic scores (0..1) + interpretations + follow-up questions
-"""
 
 import json
 import re

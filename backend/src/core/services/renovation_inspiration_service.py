@@ -582,7 +582,8 @@ async def run_smart_search(
     project_type: str,
     zip_code: str,
     search_insights: "SearchInsights",
-    location_data: Optional[Dict[str, Any]] = None
+    location_data: Optional[Dict[str, Any]] = None,
+    street_address: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Run Tavily search with smart queries built from image insights.
@@ -595,6 +596,7 @@ async def run_smart_search(
         zip_code: US zip code
         search_insights: SearchInsights from image analysis
         location_data: Optional pre-fetched location data
+        street_address: Optional street address for more local searches
 
     Returns:
         Complete inspiration data with contractor knowledge or None if failed
@@ -633,6 +635,7 @@ async def run_smart_search(
             project_type=project_type,
             location_data=location_data,
             project_id=str(project_id),  # Pass project_id for SSE events
+            street_address=street_address,  # Use specific address for local results
         )
 
         if not structured_data:
@@ -672,6 +675,57 @@ async def run_smart_search(
                 from src.core.services.event_broadcaster import emit_context_ready
                 await emit_context_ready(str(project_id))
 
+                # Auto-generate suggestions in background
+                try:
+                    logger.info(f"[renovation_inspiration] 🎯 Auto-generating suggestions...")
+                    suggestions_start = time.time()
+
+                    # Get extracted_data for current_state_summary
+                    extracted_data = project.extracted_data or {}
+                    current_state_summary = str(extracted_data)[:800] if extracted_data else "No image analysis data available"
+
+                    # Get user preferences if available
+                    renovation_vision = project.renovation_vision or {}
+                    user_preferences = renovation_vision.get("raw_input", "")
+
+                    # Generate suggestions
+                    from src.core.langgraph.nodes.image_analysis_generation.intent_detection import generate_expert_suggestions
+                    suggestions_result = await generate_expert_suggestions(
+                        project_type=project_type,
+                        current_state_summary=current_state_summary,
+                        user_preferences=user_preferences,
+                        expertise_level="novice",  # Default for auto-generation
+                        inspirations=inspirations
+                    )
+
+                    suggestions_options = suggestions_result.get("options", [])
+
+                    if suggestions_options:
+                        # Store suggestions in the inspirations dict
+                        inspirations['suggestions'] = {
+                            'options': suggestions_options,
+                            'generated_at': time.time(),
+                            'auto_generated': True
+                        }
+
+                        # Update project with suggestions
+                        project.renovation_inspirations = inspirations
+                        db.commit()
+
+                        suggestions_elapsed = time.time() - suggestions_start
+                        logger.info(f"[renovation_inspiration] ✅ Auto-generated {len(suggestions_options)} suggestions in {suggestions_elapsed:.2f}s")
+
+                        # Emit suggestions_ready event
+                        from src.core.services.event_broadcaster import emit_suggestions_ready
+                        await emit_suggestions_ready(str(project_id), len(suggestions_options))
+                    else:
+                        logger.warning(f"[renovation_inspiration] ⚠️ No suggestions generated")
+
+                except Exception as suggestions_error:
+                    logger.warning(f"[renovation_inspiration] ⚠️ Auto-suggestion generation failed: {suggestions_error}")
+                    import traceback
+                    traceback.print_exc()
+
                 return inspirations
         finally:
             db.close()
@@ -700,7 +754,8 @@ def _run_smart_search_in_thread(
     project_type: str,
     zip_code: str,
     search_insights: "SearchInsights",
-    location_data: Optional[Dict[str, Any]] = None
+    location_data: Optional[Dict[str, Any]] = None,
+    street_address: Optional[str] = None,
 ):
     """Run smart search in a new event loop in a separate thread."""
     loop = asyncio.new_event_loop()
@@ -713,6 +768,7 @@ def _run_smart_search_in_thread(
                 zip_code=zip_code,
                 search_insights=search_insights,
                 location_data=location_data,
+                street_address=street_address,
             )
         )
     finally:
@@ -747,7 +803,8 @@ def start_smart_search_background(
     project_type: str,
     zip_code: str,
     search_insights: "SearchInsights",
-    location_data: Optional[Dict[str, Any]] = None
+    location_data: Optional[Dict[str, Any]] = None,
+    street_address: Optional[str] = None,
 ) -> None:
     """
     Start background task to run smart Tavily search.
@@ -760,12 +817,19 @@ def start_smart_search_background(
         zip_code: US zip code
         search_insights: SearchInsights from image analysis
         location_data: Optional pre-fetched location data
+        street_address: Optional street address for more local searches
     """
     thread = threading.Thread(
         target=_run_smart_search_in_thread,
-        args=(project_id, project_type, zip_code, search_insights, location_data),
+        args=(project_id, project_type, zip_code, search_insights, location_data, street_address),
         daemon=True,
         name=f"smart-search-{zip_code}"
     )
     thread.start()
-    logger.info(f"[renovation_inspiration] 🎯 Started smart search for project {project_id} | zip={zip_code} | insights={search_insights.detected_era}")
+    logger.info(f"[renovation_inspiration] 🎯 Started smart search for project {project_id}")
+    logger.info(f"[renovation_inspiration]   Location: zip={zip_code}, street_address={street_address or 'N/A'}")
+    logger.info(f"[renovation_inspiration]   Insights: era={search_insights.detected_era}, style={search_insights.style_assessment}")
+    logger.info(f"[renovation_inspiration]   Problems: {search_insights.problem_areas}")
+    logger.info(f"[renovation_inspiration]   Keywords: {search_insights.search_keywords}")
+    logger.info(f"[renovation_inspiration]   Work needed: {search_insights.primary_work_needed}")
+    logger.info(f"[renovation_inspiration]   Specialty: {search_insights.specialty_required}")

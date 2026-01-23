@@ -22,8 +22,8 @@ from src.core.langgraph.prompts.intent_classification import (
 )
 from src.core.langgraph.prompts.extraction import (
     FEEDBACK_CLASSIFICATION_PROMPT,
-    BRIEF_ROOM_SUMMARY_PROMPT,
-    FEATURES_TO_RETAIN_PROMPT,
+    # BRIEF_ROOM_SUMMARY_PROMPT,  # DEPRECATED - now in comprehensive_analysis.py
+    # FEATURES_TO_RETAIN_PROMPT,  # DEPRECATED - now in comprehensive_analysis.py
 )
 from src.core.langgraph.prompts.suggestions import (
     EXPERTISE_DETECTOR_PROMPT,
@@ -45,8 +45,8 @@ __all__ = [
     "REGENERATION_MODE_CLASSIFIER_PROMPT",
     # Extraction
     "FEEDBACK_CLASSIFICATION_PROMPT",
-    "BRIEF_ROOM_SUMMARY_PROMPT",
-    "FEATURES_TO_RETAIN_PROMPT",
+    # "BRIEF_ROOM_SUMMARY_PROMPT",  # DEPRECATED
+    # "FEATURES_TO_RETAIN_PROMPT",  # DEPRECATED
     # Suggestions
     "EXPERTISE_DETECTOR_PROMPT",
     "EXPERT_SUGGESTIONS_PROMPT",

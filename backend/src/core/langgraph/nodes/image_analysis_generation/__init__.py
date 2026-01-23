@@ -19,7 +19,7 @@ from src.core.langgraph.nodes.image_analysis_generation.node import (
 )
 from src.core.langgraph.nodes.image_analysis_generation.node_services import (
     ServiceIntegration,
-    analyze_image_with_services,
+    # analyze_image_with_services,  # DEPRECATED - use analyze_single_image from analysis.py
     should_use_services,
     check_undo_request,
 )
@@ -28,7 +28,7 @@ __all__ = [
     "image_analysis_generation_node",
     # New refactored architecture
     "ServiceIntegration",
-    "analyze_image_with_services",
+    # "analyze_image_with_services",  # DEPRECATED
     "should_use_services",
     "check_undo_request",
 ]

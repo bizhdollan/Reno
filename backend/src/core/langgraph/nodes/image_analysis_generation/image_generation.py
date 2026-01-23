@@ -237,7 +237,7 @@ The output image MUST be recognizable as the SAME SPACE from the SAME ANGLE as t
         result = await provider.generate_image(
             messages=messages,
             temperature=temperature,
-            max_tokens=1024
+            max_tokens=2000
         )
 
         # Validate result structure

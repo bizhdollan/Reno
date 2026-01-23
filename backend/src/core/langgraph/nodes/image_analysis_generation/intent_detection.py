@@ -377,11 +377,12 @@ async def generate_expert_suggestions(
             budget_indicators = inspirations.get("budget_indicators", {})
             climate = inspirations.get("climate", {})
 
-            # Format popular styles
+            # Format popular styles - use ALL styles, no limit
             styles = contractor_knowledge.get("popular_styles", [])
+            logger.info(f"[generate_expert_suggestions] Processing {len(styles)} styles from contractor knowledge")
             styles_str = "\n".join([
                 f"- {s['name']}: {s['description']}\n  Key elements: {', '.join(s.get('key_elements', []))}\n  Color palette: {', '.join(s.get('color_palette', []))}"
-                for s in styles[:7]  # Show all styles
+                for s in styles  # ALL styles - no limit
             ]) if styles else "No style data available"
 
             # Format popular materials
@@ -441,6 +442,11 @@ async def generate_expert_suggestions(
             location_str = "Unknown Location"
             contractor_knowledge_context = "No contractor knowledge available. Generate suggestions based on general best practices."
 
+        # Log styles being used for verification
+        if inspirations:
+            style_names = [s.get('name', 'Unknown') for s in styles]
+            logger.info(f"[generate_expert_suggestions] Styles to generate options for: {style_names}")
+
         prompt = EXPERT_SUGGESTIONS_PROMPT.format(
             project_type=project_type,
             location_display=location_str,
@@ -450,16 +456,21 @@ async def generate_expert_suggestions(
             contractor_knowledge_context=contractor_knowledge_context
         )
 
+        # Add explicit count instruction at the end of prompt
+        num_styles = len(styles) if inspirations and styles else 5
+        explicit_count_instruction = f"\n\n**REMINDER: You MUST generate exactly {num_styles} options, one for each style listed above. Do not generate fewer.**"
+        prompt_with_count = prompt + explicit_count_instruction
+
         response = await provider.complete(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a panel of renovation experts. CRITICAL: Generate one renovation option for EACH popular_style in the contractor knowledge (if 5 styles provided, output exactly 5 options). Each option must have 5-8 key_changes. Return JSON only."
+                    "content": f"You are a panel of renovation experts. CRITICAL RULE: Generate exactly {num_styles} renovation options (one for each popular_style). If there are {num_styles} styles, output exactly {num_styles} options. Each option must have 5-8 key_changes. Return JSON only, no markdown."
                 },
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt_with_count}
             ],
-            temperature=0.7,
-            max_tokens=6000,  # Increased to support 5+ options (one per style)
+            temperature=0.3,
+            max_tokens=12000,  # Increased to ensure room for all options
             operation_type="expert_suggestions"
         )
         logger.debug(f"[expert_suggestions] Response: {response[:500]}..." if len(response) > 500 else f"[expert_suggestions] Response: {response}")

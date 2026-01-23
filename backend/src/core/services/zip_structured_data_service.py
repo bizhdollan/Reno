@@ -1,22 +1,3 @@
-#!/usr/bin/env python3
-"""
-Streamlined zip code data service for LLM consumption.
-
-Fetches evidence-based renovation insights from:
-- Zippopotam.us (place info)
-- US Census ACS (demographics, housing age, budget indicators)
-- NWS API (climate considerations)
-- Tavily API (design trends, materials, constraints with citations)
-
-Output is optimized for LLM suggestion generation - concise, actionable, with credible sources.
-
-PERFORMANCE OPTIMIZED:
-- Census, Climate, Tavily run in PARALLEL
-- Census data cached by zip (1 hour TTL)
-- Strict timeouts on all API calls (10s max)
-- Reduced Tavily results (2 per query)
-"""
-
 import asyncio
 import json
 import re
@@ -646,6 +627,93 @@ def clean_raw_content(raw_content: str) -> str:
     return text
 
 
+# ----------------------------
+# 6) Two-Stage LLM Extraction
+# ----------------------------
+
+async def filter_quality_content_with_llm(
+    raw_content: str,
+    query: str,
+    location: str,
+) -> str:
+    """
+    Stage 1: Filter raw Tavily content to extract only quality, renovation-relevant information.
+
+    Returns clean text (not JSON) containing only valuable content:
+    - Material names, brands, prices
+    - Style descriptions and trends
+    - Cost estimates and budgets
+    - Timeline expectations
+    - Contractor insights and tips
+    - Local code/permit info
+
+    Removes: ads, navigation, contact forms, irrelevant content.
+    """
+    from src.core.llm.provider import LLMProvider
+
+    # Skip if content is too small
+    word_count = len(raw_content.split())
+    if word_count < 50:
+        return ""
+
+    prompt = f"""Extract ONLY renovation-relevant information from this content.
+Location: {location}
+Query context: {query}
+
+CONTENT:
+{raw_content}
+
+EXTRACT these types of information (if present):
+- Specific materials with names, brands, prices per sq ft
+- Design styles and current trends with descriptions
+- Cost estimates and budget ranges for projects
+- Project timelines and durations
+- Contractor tips, insights, and recommendations
+- Local building codes or permit requirements
+- Real project examples with details
+
+REMOVE completely:
+- Advertisements and promotions
+- Contact forms and navigation
+- Generic marketing fluff
+- Content unrelated to renovation
+
+Return ONLY the valuable renovation content as clean, concise text.
+Preserve specific details like prices, brands, dimensions, and percentages.
+If no relevant content found, return exactly: NO_RELEVANT_CONTENT"""
+
+    try:
+        filter_start = time_module.time()
+        provider = LLMProvider.for_fast_analysis()
+
+        response = await provider.complete(
+            messages=[
+                {"role": "system", "content": "Extract renovation-relevant content. Be concise, preserve specifics."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=2000,  # Limited output for filtering stage
+            operation_type="content_quality_filter"
+        )
+
+        filter_elapsed = time_module.time() - filter_start
+        result = response.strip()
+        if result == "NO_RELEVANT_CONTENT" or len(result) < 30:
+            logger.info(f"[zip_structured_data] 📝 Filter for '{query[:30]}...' → no content ({filter_elapsed:.2f}s)")
+            return ""
+
+        logger.info(f"[zip_structured_data] 📝 Filter for '{query[:30]}...' → {word_count}→{len(result.split())} words ({filter_elapsed:.2f}s)")
+        return result
+
+    except Exception as e:
+        logger.warning(f"[zip_structured_data] ⚠️ Quality filter failed: {e}")
+        # Fallback: return truncated cleaned content
+        words = raw_content.split()
+        if len(words) > 500:
+            return " ".join(words[:500])
+        return raw_content
+
+
 async def extract_contractor_knowledge_with_llm(
     cleaned_content: str,
     location: Dict[str, Any],
@@ -653,8 +721,14 @@ async def extract_contractor_knowledge_with_llm(
     climate_context: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Use LLM to extract contractor knowledge from cleaned Tavily content.
-    OPTIMIZED: Concise prompt for faster extraction.
+    Stage 2: Extract structured JSON from pre-filtered quality content.
+
+    This receives already-filtered content from Stage 1, so it's:
+    - Much smaller (typically 10-20k words vs 50-60k)
+    - Higher quality (irrelevant content removed)
+    - Focused on renovation-relevant information
+
+    Returns structured contractor knowledge as JSON.
     """
     from src.core.llm.provider import LLMProvider
 
@@ -664,10 +738,10 @@ async def extract_contractor_knowledge_with_llm(
 
     # Truncate content only if extremely large (max ~25000 words ≈ 35k tokens)
     # Modern LLMs (GPT-4o, Claude) can handle much larger contexts
-    words = cleaned_content.split()
-    if len(words) > 25000:
-        cleaned_content = " ".join(words[:25000])
-        logger.info(f"[zip_structured_data] ⚠️  Truncated content from {len(words)} to 25000 words")
+    # words = cleaned_content.split()
+    # if len(words) > 25000:
+    #     cleaned_content = " ".join(words[:25000])
+    #     logger.info(f"[zip_structured_data] ⚠️  Truncated content from {len(words)} to 25000 words")
 
     # OPTIMIZED: Much shorter prompt
     prompt = f"""Extract renovation contractor knowledge for {city}, {state_abbr} (budget tier: {finish_tier}) from this content.
@@ -710,7 +784,7 @@ REQUIREMENTS:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,  # Slightly higher for richer descriptions
-            max_tokens=5000,  # Increased for comprehensive extraction
+            max_tokens=10000,  # Increased for comprehensive extraction
             operation_type="contractor_knowledge_extraction"
         )
 
@@ -773,38 +847,65 @@ async def _fetch_climate_async(lat: float, lon: float) -> Tuple[Optional[Dict[st
         return None, elapsed
 
 
+@dataclass
+class TavilyQueryResult:
+    """Result from a single Tavily query including filtered quality content."""
+    query: str
+    results: List[TavilyResult]
+    quality_content: str  # Stage 1 filtered content
+
+
 async def _fetch_tavily_async(
     api_key: str,
     queries: List[str],
-    project_id: Optional[str] = None
-) -> Tuple[List[TavilyResult], float]:
-    """Async wrapper for Tavily searches - runs queries in parallel."""
+    project_id: Optional[str] = None,
+    location: str = "",
+) -> Tuple[List[TavilyResult], List[str], float]:
+    """
+    Async wrapper for Tavily searches with Stage 1 quality filtering.
+
+    For each query:
+    1. Fetch Tavily results
+    2. Clean raw content
+    3. Run Stage 1 LLM filtering to extract quality content
+
+    Returns:
+    - List of all TavilyResults (for sources/citations)
+    - List of quality content strings (for Stage 2 extraction)
+    - Elapsed time
+    """
     start = time_module.time()
     loop = asyncio.get_event_loop()
     all_results: List[TavilyResult] = []
+    all_quality_content: List[str] = []
     total_queries = len(queries)
 
     # Emit search_start event for SSE streaming
     if project_id and queries:
         await emit_search_start(project_id, queries)
 
-    async def search_query(q: str, idx: int) -> List[TavilyResult]:
+    async def search_and_filter_query(q: str, idx: int) -> TavilyQueryResult:
+        """Fetch results for a query and run Stage 1 quality filtering."""
+        query_start = time_module.time()
         try:
             # Emit search query event
             if project_id:
                 await emit_search_query(project_id, q, idx, total_queries)
 
+            # Step 1: Fetch Tavily results
+            tavily_start = time_module.time()
             results = await loop.run_in_executor(
                 None,
                 lambda: tavily_search(
                     api_key=api_key,
                     query=q,
                     search_depth="advanced",
-                    max_results=2,  # Reduced to 2 per query
+                    max_results=2,
                     include_raw_content=True,
                 )
             )
-            logger.info(f"[zip_structured_data]   Query '{q[:40]}...' → {len(results)} results")
+            tavily_elapsed = time_module.time() - tavily_start
+            logger.info(f"[zip_structured_data]   Query '{q[:40]}...' → {len(results)} results ({tavily_elapsed:.2f}s)")
 
             # Emit search result events
             if project_id:
@@ -816,18 +917,52 @@ async def _fetch_tavily_async(
                         snippet=result.content[:150] if result.content else None
                     )
 
-            return results
-        except Exception as e:
-            logger.info(f"[zip_structured_data] ❌ Tavily query failed for '{q}': {e}")
-            return []
+            # Step 2: Clean and combine raw content for this query
+            query_content_parts = []
+            for result in results:
+                if result.raw_content:
+                    cleaned = clean_raw_content(result.raw_content)
+                    if cleaned:
+                        query_content_parts.append(f"[{result.title}]\n{cleaned}")
 
-    # Run all queries in parallel
-    query_results = await asyncio.gather(*[search_query(q, idx) for idx, q in enumerate(queries)])
-    for results in query_results:
-        all_results.extend(results)
+            if not query_content_parts:
+                return TavilyQueryResult(query=q, results=results, quality_content="")
+
+            combined_for_query = "\n\n".join(query_content_parts)
+            word_count = len(combined_for_query.split())
+            logger.info(f"[zip_structured_data]   Query '{q[:30]}...' content: {word_count} words")
+
+            # Step 3: Stage 1 - Filter quality content with LLM
+            quality_content = await filter_quality_content_with_llm(
+                raw_content=combined_for_query,
+                query=q,
+                location=location,
+            )
+
+            query_total = time_module.time() - query_start
+            logger.info(f"[zip_structured_data]   Query #{idx+1} total: {query_total:.2f}s")
+            return TavilyQueryResult(query=q, results=results, quality_content=quality_content)
+
+        except Exception as e:
+            query_total = time_module.time() - query_start
+            logger.info(f"[zip_structured_data] ❌ Tavily query failed for '{q}' after {query_total:.2f}s: {e}")
+            return TavilyQueryResult(query=q, results=[], quality_content="")
+
+    # Run all queries + Stage 1 filtering in parallel
+    logger.info(f"[zip_structured_data] 🔍 Running {total_queries} queries with Stage 1 filtering...")
+    query_results = await asyncio.gather(*[search_and_filter_query(q, idx) for idx, q in enumerate(queries)])
+
+    # Collect results
+    for qr in query_results:
+        all_results.extend(qr.results)
+        if qr.quality_content:
+            all_quality_content.append(f"### {qr.query[:50]}\n{qr.quality_content}")
 
     elapsed = time_module.time() - start
-    return all_results, elapsed
+    total_quality_words = sum(len(qc.split()) for qc in all_quality_content)
+    logger.info(f"[zip_structured_data] ✅ Stage 1 complete: {len(all_quality_content)} queries with quality content, {total_quality_words} total words")
+
+    return all_results, all_quality_content, elapsed
 
 
 # ----------------------------
@@ -951,6 +1086,7 @@ async def get_zip_structured_data(
     project_type: Optional[str] = None,
     location_data: Optional[Dict[str, Any]] = None,
     project_id: Optional[str] = None,
+    street_address: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main function to fetch all structured data for a zip code.
@@ -959,11 +1095,12 @@ async def get_zip_structured_data(
     - Census, Climate, Tavily run in PARALLEL (not sequential!)
     - Census data cached for 1 hour
     - Strict timeouts on all API calls
-    - Reduced Tavily results (2 per query)
+    - 3 Tavily results per query
 
     NEW: Smart queries from image insights
     - If search_insights is provided, builds contextual queries based on image analysis
     - If location_data is provided, skips Census/Climate fetch (already cached)
+    - If street_address is provided, uses it for more local search results
 
     Args:
         zip_code: US zip code
@@ -972,6 +1109,7 @@ async def get_zip_structured_data(
         search_insights: Optional SearchInsights from image analysis for smart queries
         project_type: Optional project type for query building
         location_data: Optional pre-fetched location data (from get_location_data_only)
+        street_address: Optional street address for more specific local searches
 
     Returns streamlined output with contractor knowledge extracted by LLM:
     - Location info
@@ -1011,9 +1149,10 @@ async def get_zip_structured_data(
             insights=search_insights,
             project_type=ptype,
             city=place.get("city", ""),
-            state_abbr=place.get("state_abbr", "")
+            state_abbr=place.get("state_abbr", ""),
+            street_address=street_address,  # Use specific address if available
         )
-        logger.info(f"[zip_structured_data] 🎯 Smart queries built from image insights:")
+        logger.info(f"[zip_structured_data] 🎯 Smart queries built from image insights (street_address: {bool(street_address)}):")
         for i, q in enumerate(queries):
             logger.info(f"[zip_structured_data]   {i+1}. {q}")
     else:
@@ -1048,7 +1187,12 @@ async def get_zip_structured_data(
 
     # Tavily task (only if API key provided)
     if tavily_api_key:
-        tavily_task = _fetch_tavily_async(tavily_api_key, queries, project_id)
+        tavily_task = _fetch_tavily_async(
+            tavily_api_key,
+            queries,
+            project_id,
+            location=loc,  # Pass location for Stage 1 filtering
+        )
         tasks.append(tavily_task)
         task_names.append("tavily")
 
@@ -1091,13 +1235,14 @@ async def get_zip_structured_data(
         climate = location_data["climate"]
         logger.info(f"[zip_structured_data] Using cached climate data")
 
-    # Tavily result
+    # Tavily result (now includes Stage 1 quality content)
     all_tavily_results: List[TavilyResult] = []
+    all_quality_content: List[str] = []
     tavily_time = 0
     if "tavily" in task_names:
         if not isinstance(results[result_idx], Exception):
-            all_tavily_results, tavily_time = results[result_idx]
-            logger.info(f"[zip_structured_data] ⏱️  Tavily searches: {len(all_tavily_results)} results | {tavily_time:.2f}s")
+            all_tavily_results, all_quality_content, tavily_time = results[result_idx]
+            logger.info(f"[zip_structured_data] ⏱️  Tavily + Stage 1: {len(all_tavily_results)} results, {len(all_quality_content)} filtered | {tavily_time:.2f}s")
         else:
             logger.info(f"[zip_structured_data] ❌ Tavily failed: {results[result_idx]}")
 
@@ -1143,35 +1288,53 @@ async def get_zip_structured_data(
     }
 
     llm_time = 0
-    if all_tavily_results:
+    if all_quality_content:
+        # Stage 2: Use pre-filtered quality content from Stage 1
         all_tavily_results = dedupe_results(all_tavily_results)
         logger.info(f"[zip_structured_data] Found {len(all_tavily_results)} unique sources")
 
-        # Clean and combine content
-        clean_start = time_module.time()
-        combined_content = []
-        for result in all_tavily_results:
-            if result.raw_content:
-                cleaned = clean_raw_content(result.raw_content)
-                if cleaned:
-                    combined_content.append(f"=== Source: {result.title} ===\n{cleaned}\n")
+        # Combine Stage 1 quality content (already filtered!)
+        full_quality_content = "\n\n".join(all_quality_content)
+        word_count = len(full_quality_content.split())
+        logger.info(f"[zip_structured_data] 📊 Stage 2 input: {word_count} words (pre-filtered quality content)")
 
-        full_content = "\n\n".join(combined_content)
-        clean_time = time_module.time() - clean_start
-        word_count = len(full_content.split())
-        logger.info(f"[zip_structured_data] ⏱️  Content cleaning: {clean_time:.2f}s | {word_count} words")
-        with open("debug_cleaned_content.txt", "w", encoding="utf-8") as f:
-            f.write(full_content)
-        # Extract contractor knowledge using LLM
+        # Debug: save quality content
+        with open("debug_quality_content.txt", "w", encoding="utf-8") as f:
+            f.write(full_quality_content)
+
+        # Stage 2: Extract structured JSON from quality content
         llm_start = time_module.time()
         contractor_knowledge = await extract_contractor_knowledge_with_llm(
-            cleaned_content=full_content,
+            cleaned_content=full_quality_content,
             location=place,
             budget_context=design_insights["budget_indicators"],
             climate_context=climate if climate else {}
         )
         llm_time = time_module.time() - llm_start
-        logger.info(f"[zip_structured_data] ⏱️  LLM extraction: {llm_time:.2f}s")
+        logger.info(f"[zip_structured_data] ⏱️  Stage 2 LLM extraction: {llm_time:.2f}s")
+    elif all_tavily_results:
+        # Fallback: No quality content but have results (Stage 1 failed for all)
+        logger.warning(f"[zip_structured_data] ⚠️  Stage 1 produced no quality content, using raw results")
+        all_tavily_results = dedupe_results(all_tavily_results)
+
+        # Fall back to old method
+        combined_content = []
+        for result in all_tavily_results:
+            if result.raw_content:
+                cleaned = clean_raw_content(result.raw_content)
+                if cleaned:
+                    combined_content.append(f"=== {result.title} ===\n{cleaned}\n")
+
+        if combined_content:
+            full_content = "\n\n".join(combined_content)
+            llm_start = time_module.time()
+            contractor_knowledge = await extract_contractor_knowledge_with_llm(
+                cleaned_content=full_content,
+                location=place,
+                budget_context=design_insights["budget_indicators"],
+                climate_context=climate if climate else {}
+            )
+            llm_time = time_module.time() - llm_start
     elif tavily_api_key:
         logger.info(f"[zip_structured_data] ⚠️  No Tavily results found")
 

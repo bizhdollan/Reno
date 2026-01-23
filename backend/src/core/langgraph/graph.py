@@ -1,10 +1,9 @@
 """
 Main LangGraph definition for renovation estimation.
 
-3-Stage Architecture (project_basics handled by form):
+2-Stage Architecture (project_basics handled by form):
 1. image_analysis_generation - Analyze images, confirm, collect vision, generate preview
-2. final_review - Review all data before estimation
-3. cost_estimation - Generate 3-tier estimate, handle selection
+2. cost_estimation - Generate 3-tier estimate, handle selection
 """
 
 from langgraph.graph import StateGraph, START, END
@@ -14,7 +13,6 @@ from src.core.langgraph.state import ProjectState, create_initial_state
 from src.core.langgraph.utils import get_message_content
 from src.core.langgraph.nodes import (
     image_analysis_generation_node,
-    final_review_node,
     cost_estimation_node,
 )
 
@@ -50,9 +48,8 @@ def create_graph(checkpointer: str | None = None):
     """
     builder = StateGraph(ProjectState)
 
-    # Add nodes (3 stages - project_basics handled by form)
+    # Add nodes (2 stages - project_basics handled by form)
     builder.add_node("image_analysis_generation", image_analysis_generation_node)
-    builder.add_node("final_review", final_review_node)
     builder.add_node("cost_estimation", cost_estimation_node)
 
     # Entry point routes to current stage
@@ -61,22 +58,18 @@ def create_graph(checkpointer: str | None = None):
         route_by_stage,
         {
             "image_analysis_generation": "image_analysis_generation",
-            "final_review": "final_review",
             "cost_estimation": "cost_estimation",
             END: END
         }
     )
-    
-    # image_analysis_generation can loop back or continue to final_review/cost_estimation
+
+    # image_analysis_generation can loop back or continue to cost_estimation
     def image_analysis_router(state: ProjectState) -> str:
         if state.get("awaiting_user_input", True):
             return "end"
-        # Check if we should go to cost_estimation (simplified flow - skip final_review)
+        # Check if we should go to cost_estimation
         if state.get("current_stage") == "cost_estimation":
             return "cost_estimation"
-        # Check if we should go to final_review (legacy flow)
-        if state.get("current_stage") == "final_review":
-            return "final_review"
         # Otherwise loop back for sub-state processing
         return "continue"
 
@@ -85,41 +78,19 @@ def create_graph(checkpointer: str | None = None):
         image_analysis_router,
         {
             "continue": "image_analysis_generation",
-            "final_review": "final_review",
             "cost_estimation": "cost_estimation",
             "end": END
         }
     )
-    
-    # final_review can auto-continue to cost_estimation or go back to image_analysis
-    def final_review_router(state: ProjectState) -> str:
-        if state.get("awaiting_user_input", True):
-            return "end"
-        stage = state.get("current_stage")
-        if stage == "cost_estimation":
-            return "cost_estimation"
-        elif stage == "image_analysis_generation":
-            return "image_analysis_generation"
-        return "end"
-    
-    builder.add_conditional_edges(
-        "final_review",
-        final_review_router,
-        {
-            "cost_estimation": "cost_estimation",
-            "image_analysis_generation": "image_analysis_generation",
-            "end": END
-        }
-    )
-    
+
     # cost_estimation always waits for user (to select tier)
     builder.add_edge("cost_estimation", END)
-    
+
     if checkpointer == "memory":
         checkpointer = MemorySaver()
     elif checkpointer is None:
         checkpointer = None
-    
+
     return builder.compile(checkpointer=checkpointer)
 
 
@@ -157,24 +128,24 @@ async def run_conversation(
     # Store selected image URL for image editing context
     if selected_image_url:
         state["selected_image_url"] = selected_image_url
-    
+
     # Run graph
     config = {"configurable": {"thread_id": project_id}}
     result = await graph.ainvoke(state, config)
-    
+
     # Extract assistant response(s)
     messages = result.get("messages", [])
     assistant_responses = []
-    
+
     for msg in messages:
         role, content = get_message_content(msg)
         if role == "assistant" and content:
             assistant_responses.append(content)
-    
+
     # Return the last (most recent) assistant response
     if assistant_responses:
         final_response = assistant_responses[-1]
     else:
         final_response = ""
-    
+
     return result, final_response

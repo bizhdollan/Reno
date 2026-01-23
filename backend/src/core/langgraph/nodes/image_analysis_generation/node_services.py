@@ -1,22 +1,3 @@
-"""
-Service Integration Layer for Image Analysis & Generation Node.
-
-This module provides helper functions to integrate the new service layer
-with the existing node implementation, enabling gradual migration to the
-refactored architecture.
-
-Usage in node.py:
-    from .node_services import ServiceIntegration
-
-    async def image_analysis_generation_node(state: ProjectState) -> dict:
-        services = ServiceIntegration.from_state(state)
-
-        # Use services for new functionality
-        if services.is_refactored_mode:
-            analysis = await services.analyze_image(image_url)
-            ...
-"""
-
 from typing import Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
@@ -151,82 +132,6 @@ class ServiceIntegration:
                 cache=self.cache
             )
         return self._correction_service
-
-    # =========================================================================
-    # High-Level Helper Methods
-    # =========================================================================
-
-    async def analyze_and_store_image(
-        self,
-        image_url: str,
-        project_type: str = "renovation"
-    ) -> ImageAnalysis:
-        """
-        Analyze an image and store results in database.
-
-        Returns:
-            ImageAnalysis record with extracted features and critical elements
-        """
-        if not self.project_id:
-            raise ValueError("project_id required for DB-backed operations")
-
-        project_uuid = UUID(self.project_id)
-
-        # Analyze image
-        analysis = await self.image_analysis.analyze_image(
-            image_url=image_url,
-            project_id=project_uuid,
-            project_type=project_type
-        )
-
-        # Detect perspective and store metadata
-        await self.perspective.detect_perspective(
-            image_url=image_url,
-            image_analysis_id=analysis.id,
-            project_id=project_uuid
-        )
-
-        return analysis
-
-    async def validate_images(
-        self,
-        image_urls: list[str],
-        project_type: str = "renovation"
-    ) -> tuple[list[ImageAnalysis], list[dict]]:
-        """
-        Validate and analyze multiple images.
-
-        Checks room consistency and detects conflicts.
-
-        Returns:
-            (list of analyses, list of conflicts)
-        """
-        if not self.project_id:
-            raise ValueError("project_id required for DB-backed operations")
-
-        project_uuid = UUID(self.project_id)
-
-        # Analyze all images
-        analyses = []
-        for url in image_urls:
-            analysis = await self.image_analysis.analyze_image(
-                image_url=url,
-                project_id=project_uuid,
-                project_type=project_type
-            )
-            analyses.append(analysis)
-
-        # Validate room consistency
-        analysis_ids = [a.id for a in analyses]
-        is_valid, error = await self.image_analysis.validate_room_consistency(analysis_ids)
-
-        if not is_valid:
-            raise ValueError(error)
-
-        # Detect perspective conflicts
-        conflicts = await self.image_analysis.detect_perspective_conflicts(analysis_ids)
-
-        return analyses, conflicts
 
     async def generate_with_services(
         self,
@@ -396,37 +301,6 @@ class ServiceIntegration:
         """Context manager exit - cleanup resources."""
         self.cleanup()
         return False
-
-
-# =========================================================================
-# Convenience Functions for Gradual Migration
-# =========================================================================
-
-async def analyze_image_with_services(
-    image_url: str,
-    project_id: str,
-    project_type: str = "renovation"
-) -> dict:
-    """
-    Standalone function to analyze an image using services.
-
-    Returns dict compatible with existing node expectations.
-    """
-    with ServiceIntegration(project_id=project_id) as services:
-        analysis = await services.analyze_and_store_image(
-            image_url=image_url,
-            project_type=project_type
-        )
-
-        return {
-            "id": str(analysis.id),
-            "url": analysis.image_url,
-            "room_type": analysis.room_type,
-            "extracted_features": analysis.extracted_features,
-            "critical_elements": analysis.critical_elements,
-            "confidence": float(analysis.confidence_score) if analysis.confidence_score else 0.0
-        }
-
 
 async def should_use_services(state: ProjectState) -> bool:
     """

@@ -127,7 +127,7 @@ class BudgetContextService:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
-            max_tokens=200
+            max_tokens=1000
         )
 
         # Parse response
@@ -201,7 +201,7 @@ class BudgetContextService:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=500
+                max_tokens=1000
             )
             return parse_json(response)
         except Exception as e:
@@ -302,7 +302,7 @@ Return valid JSON only."""
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=800
+                max_tokens=2000
             )
             return parse_json(response)
         except Exception as e:

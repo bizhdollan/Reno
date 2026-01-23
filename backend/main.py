@@ -28,7 +28,6 @@ from src.api.v1.projects import router as projects_router
 from src.api.v1.marketplace import router as marketplace_router
 from src.api.v1.unlock import router as unlock_router
 from src.api.v1.stream import router as stream_router
-from src.api.v1.entities import router as entities_router
 from src.db.database import engine, SessionLocal
 
 
@@ -76,7 +75,6 @@ app.include_router(projects_router)
 app.include_router(marketplace_router)
 app.include_router(unlock_router)
 app.include_router(stream_router)
-app.include_router(entities_router)
 
 # Ensure images directory exists
 IMAGES_DIR = Path("images")

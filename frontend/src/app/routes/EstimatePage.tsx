@@ -10,13 +10,15 @@ import rehypeRaw from "rehype-raw";
 import ImageLightbox from "../../components/shared/ImageLightBox";
 import { api } from "../../lib/api";
 import { storage } from "../../lib/storage";
+import { SuggestionsReadyButton } from "../../components/SuggestionsReadyButton";
+import { SuggestionsPopup } from "../../components/SuggestionsPopup";
 import { TokenPopup } from "../../components/TokenPopup";
 import SuggestionCards, { SuggestionOption, Source } from "../../components/SuggestionCards";
 import { ContextProgress } from "../../components/ContextProgress";
 import { ProjectBasicsForm } from "../../components/ProjectBasicsForm";
 import { Canvas } from "../../components/Canvas";
 import { MobileCanvasExpander } from "../../components/MobileCanvasExpander";
-import { useEntityDetection } from "../../hooks/useEntityDetection";
+import { useEntityDetection, extractEntitiesFromState } from "../../hooks/useEntityDetection";
 import { QuickActionButtons } from "../../components/QuickActionButtons";
 import { StepIndicator } from "../../components/StepIndicator";
 import { ImageUploadPrompt } from "../../components/ImageUploadPrompt";
@@ -1453,8 +1455,15 @@ export default function EstimatePage() {
   // Track used quick action IDs - buttons disappear after clicking
   const [usedActionIds, setUsedActionIds] = useState<Set<string>>(new Set());
 
-  // Entity detection for targeted editing
-  const { entities, isLoading: isDetectingEntities, detectEntities, clearEntities } = useEntityDetection();
+  // Track when background suggestions are ready (after Tavily + Cerebras completes)
+  const [suggestionsReady, setSuggestionsReady] = useState(false);
+  const [showSuggestionsPopup, setShowSuggestionsPopup] = useState(false);
+  const [preGeneratedSuggestions, setPreGeneratedSuggestions] = useState<SuggestionOption[]>([]);
+  const [suggestionSources, setSuggestionSources] = useState<Source[]>([]);
+  const suggestionsPollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Entity detection for targeted editing (entities come from comprehensive analysis, not separate API)
+  const { entities, isLoading: isDetectingEntities, setEntitiesFromState, clearEntities } = useEntityDetection();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1534,6 +1543,107 @@ export default function EstimatePage() {
       return () => clearTimeout(timeout);
     }
   }, [isGatheringContext, contextReady]);
+
+  // Polling for suggestions ready (runs after images uploaded until suggestions available)
+  useEffect(() => {
+    // Start polling when:
+    // 1. We have uploaded images (hasUploadedInitialImages is true)
+    // 2. We have a valid project ID
+    // 3. Suggestions are not yet ready
+    // 4. We haven't already loaded pre-generated suggestions
+    const shouldPoll =
+      hasUploadedInitialImages &&
+      projectId &&
+      projectId !== "new" &&
+      !suggestionsReady &&
+      preGeneratedSuggestions.length === 0;
+
+    if (shouldPoll) {
+      console.log("[EstimatePage] Starting suggestions polling for project:", projectId);
+      let pollCount = 0;
+      const maxPolls = 30; // 30 * 5s = 150s max polling time
+      const pollInterval = 5000; // 5 seconds
+
+      const poll = async () => {
+        pollCount++;
+        console.log(`[EstimatePage] Polling for suggestions (attempt ${pollCount}/${maxPolls})`);
+
+        try {
+          const response = await api.getSuggestions(projectId) as {
+            status: string;
+            options: SuggestionOption[];
+            sources: Source[];
+            message?: string;
+          };
+
+          if (response.status === "ready" && response.options?.length > 0) {
+            console.log(`[EstimatePage] ✅ Suggestions ready! Found ${response.options.length} options`);
+            setPreGeneratedSuggestions(response.options);
+            setSuggestionSources(response.sources || []);
+            setSuggestionsReady(true);
+            // Stop polling
+            if (suggestionsPollingRef.current) {
+              clearInterval(suggestionsPollingRef.current);
+              suggestionsPollingRef.current = null;
+            }
+          } else if (response.status === "pending") {
+            console.log("[EstimatePage] Suggestions still pending...");
+          } else if (pollCount >= maxPolls) {
+            console.log("[EstimatePage] Max poll attempts reached, stopping");
+            if (suggestionsPollingRef.current) {
+              clearInterval(suggestionsPollingRef.current);
+              suggestionsPollingRef.current = null;
+            }
+          }
+        } catch (err) {
+          console.error("[EstimatePage] Poll error:", err);
+        }
+      };
+
+      // Initial poll immediately
+      poll();
+      // Then poll every 5 seconds
+      suggestionsPollingRef.current = setInterval(poll, pollInterval);
+
+      return () => {
+        if (suggestionsPollingRef.current) {
+          console.log("[EstimatePage] Stopping suggestions polling");
+          clearInterval(suggestionsPollingRef.current);
+          suggestionsPollingRef.current = null;
+        }
+      };
+    }
+  }, [hasUploadedInitialImages, projectId, suggestionsReady, preGeneratedSuggestions.length]);
+
+  // Check if suggestions are already ready on session restore
+  useEffect(() => {
+    const fetchSuggestionsOnRestore = async () => {
+      if (
+        projectId &&
+        projectId !== "new" &&
+        projectState?.renovation_inspirations &&
+        !projectState.renovation_inspirations._tavily_pending &&
+        preGeneratedSuggestions.length === 0
+      ) {
+        try {
+          const response = await api.getSuggestions(projectId) as {
+            status: string;
+            options: SuggestionOption[];
+            sources: Source[];
+          };
+          if (response.status === "ready" && response.options?.length > 0) {
+            setPreGeneratedSuggestions(response.options);
+            setSuggestionSources(response.sources || []);
+            setSuggestionsReady(true);
+            console.log(`[EstimatePage] Session restore: Loaded ${response.options.length} suggestions`);
+          }
+        } catch (err) {
+          console.error("[EstimatePage] Failed to fetch suggestions on restore:", err);
+        }
+      }
+    };
+    fetchSuggestionsOnRestore();
+  }, [projectId, projectState?.renovation_inspirations, preGeneratedSuggestions.length]);
 
   // Add file to upload with video support
   const addFileToUpload = useCallback(async (file: File, thumbnail?: string, duration?: number) => {
@@ -2069,18 +2179,17 @@ export default function EstimatePage() {
     }
   }, [canvasImages, selectedCanvasImageId]);
 
-  // Detect entities when selected image changes
+  // Extract entities from projectState (from comprehensive analysis)
+  // Entities are now part of the chat response, not a separate API call
   useEffect(() => {
-    if (showCanvas && selectedCanvasImageId && canvasImages.length > 0) {
-      const selectedImage = canvasImages.find((img) => img.id === selectedCanvasImageId);
-      if (selectedImage?.url) {
-        // Detect entities for any selected image (uploaded or generated)
-        detectEntities(selectedImage.url, projectId !== "new" ? projectId : undefined);
-      } else {
-        clearEntities();
-      }
+    if (showCanvas && projectState?.image_analyses?.length > 0) {
+      // Extract entities from comprehensive analysis results
+      const extractedEntities = extractEntitiesFromState(projectState);
+      setEntitiesFromState(extractedEntities);
+    } else if (!showCanvas) {
+      clearEntities();
     }
-  }, [selectedCanvasImageId, showCanvas, canvasImages, projectId, detectEntities, clearEntities]);
+  }, [showCanvas, projectState?.image_analyses, setEntitiesFromState, clearEntities]);
 
   // Handle quick action button click - mark as used and send message
   const handleQuickAction = useCallback((message: string, actionId: string) => {
@@ -2088,6 +2197,26 @@ export default function EstimatePage() {
     setUsedActionIds((prev) => new Set(prev).add(actionId));
     sendMessage(message);
   }, [sendMessage]);
+
+  // Handle click on "Suggestions Ready" button - opens popup with pre-generated suggestions
+  const handleSuggestionsReady = useCallback(() => {
+    if (preGeneratedSuggestions.length > 0) {
+      setShowSuggestionsPopup(true);
+    }
+  }, [preGeneratedSuggestions.length]);
+
+  // Handle selection from suggestions popup - visualize the selected style
+  const handleSuggestionSelect = useCallback((optionIndex: number) => {
+    const selectedOption = preGeneratedSuggestions[optionIndex];
+    if (selectedOption) {
+      // Hide the button after selection
+      setSuggestionsReady(false);
+      setUsedActionIds((prev) => new Set(prev).add("suggest"));
+      // Send message to visualize the selected option
+      sendMessage(`Generate option ${optionIndex + 1}: ${selectedOption.style_name}`);
+    }
+    setShowSuggestionsPopup(false);
+  }, [preGeneratedSuggestions, sendMessage]);
 
   // Show "Continue to Estimate" button when user has generated images
   const hasGeneratedImages = useMemo(() => {
@@ -2362,7 +2491,13 @@ export default function EstimatePage() {
 
             {/* Quick Action Buttons - dynamic based on entities and state */}
             {showCanvas && canvasImages.length > 0 && !isSending && !isDetectingEntities && (
-              <div className="mb-2">
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                {/* Suggestions Ready Button - appears when pre-generated suggestions are available */}
+                <SuggestionsReadyButton
+                  onClick={handleSuggestionsReady}
+                  disabled={isSending}
+                  isVisible={suggestionsReady && preGeneratedSuggestions.length > 0 && !usedActionIds.has("suggest") && !hasGeneratedImages}
+                />
                 <QuickActionButtons
                   onAction={handleQuickAction}
                   disabled={isSending}
@@ -2442,6 +2577,15 @@ export default function EstimatePage() {
           </div>
         </motion.footer>
       )}
+
+      {/* Suggestions Popup */}
+      <SuggestionsPopup
+        isOpen={showSuggestionsPopup}
+        onClose={() => setShowSuggestionsPopup(false)}
+        options={preGeneratedSuggestions}
+        sources={suggestionSources}
+        onSelectOption={handleSuggestionSelect}
+      />
 
       {/* Save Project Modal */}
       <AnimatePresence>

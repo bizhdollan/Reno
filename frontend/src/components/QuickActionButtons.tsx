@@ -1,5 +1,4 @@
 import { motion } from "framer-motion";
-import { Sparkles } from "lucide-react";
 
 export interface DetectedEntity {
   type: string;
@@ -20,20 +19,10 @@ export function QuickActionButtons({
   disabled = false,
   entities = [],
   usedActionIds = new Set(),
-  hasGeneratedImages = false,
 }: QuickActionButtonsProps) {
-  // Build action buttons dynamically
-  const actions: { id: string; label: string; message: string; variant: "suggest" | "entity" }[] = [];
-
-  // Only show "Suggest ideas" if no generated images yet and not already used
-  if (!hasGeneratedImages && !usedActionIds.has("suggest")) {
-    actions.push({
-      id: "suggest",
-      label: "Suggest ideas",
-      message: "Suggest some renovation ideas for this room",
-      variant: "suggest",
-    });
-  }
+  // Build action buttons dynamically - only entity-based buttons now
+  // "Suggest Ideas" has been removed - suggestions are shown via dedicated button + popup
+  const actions: { id: string; label: string; message: string; variant: "entity" }[] = [];
 
   // Add entity-based buttons (not already used)
   entities.slice(0, 5).forEach((entity) => {
@@ -57,19 +46,9 @@ export function QuickActionButtons({
     return null;
   }
 
-  const getButtonClasses = (variant: "suggest" | "entity") => {
-    const base = "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap";
-
-    switch (variant) {
-      case "suggest":
-        // Primary amber color for suggest ideas
-        return `${base} bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-500/30`;
-      case "entity":
-        // Different color for entity buttons - teal/cyan
-        return `${base} bg-teal-100 dark:bg-teal-500/20 text-teal-700 dark:text-teal-400 hover:bg-teal-200 dark:hover:bg-teal-500/30`;
-      default:
-        return `${base} bg-navy-100 dark:bg-navy-700 text-navy-600 dark:text-navy-300 hover:bg-navy-200 dark:hover:bg-navy-600`;
-    }
+  const getButtonClasses = () => {
+    // Entity buttons - teal/cyan color
+    return "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap bg-teal-100 dark:bg-teal-500/20 text-teal-700 dark:text-teal-400 hover:bg-teal-200 dark:hover:bg-teal-500/30";
   };
 
   return (
@@ -84,9 +63,8 @@ export function QuickActionButtons({
           transition={{ duration: 0.2, delay: index * 0.05 }}
           whileHover={{ scale: disabled ? 1 : 1.02 }}
           whileTap={{ scale: disabled ? 1 : 0.98 }}
-          className={`${getButtonClasses(action.variant)} disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0`}
+          className={`${getButtonClasses()} disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0`}
         >
-          {action.variant === "suggest" && <Sparkles className="w-4 h-4" />}
           <span>{action.label}</span>
         </motion.button>
       ))}
