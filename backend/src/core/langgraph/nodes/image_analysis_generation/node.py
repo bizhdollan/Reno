@@ -2094,27 +2094,27 @@ def _parse_option_selection(user_message: str, pending_suggestions: list) -> lis
     return list(dict.fromkeys(selected_indices))
 
 
-def _format_suggestions_response(suggestions_result: dict) -> str:
-    """Format suggestions for display (fallback text format)."""
-    options = suggestions_result.get("options", [])
-    response_parts = ["# Renovation Options\n\nBased on your space, here are my recommendations:\n"]
+# def _format_suggestions_response(suggestions_result: dict) -> str:
+#     """Format suggestions for display (fallback text format)."""
+#     options = suggestions_result.get("options", [])
+#     response_parts = ["# Renovation Options\n\nBased on your space, here are my recommendations:\n"]
 
-    for i, opt in enumerate(options, 1):
-        response_parts.append(f"\n### Option {i}: {opt.get('style_name', 'Option')}\n")
-        response_parts.append(f"{opt.get('description', '')}\n\n")
-        response_parts.append("**Key Changes:**\n")
-        for change in opt.get("key_changes", []):
-            response_parts.append(f"- {change}\n")
-        response_parts.append(f"\n*Budget: {opt.get('budget_tier', 'mid-range')} | "
-                             f"Transformation: {opt.get('transformation_level', 'moderate')}*\n")
+#     for i, opt in enumerate(options, 1):
+#         response_parts.append(f"\n### Option {i}: {opt.get('style_name', 'Option')}\n")
+#         response_parts.append(f"{opt.get('description', '')}\n\n")
+#         response_parts.append("**Key Changes:**\n")
+#         for change in opt.get("key_changes", []):
+#             response_parts.append(f"- {change}\n")
+#         response_parts.append(f"\n*Budget: {opt.get('budget_tier', 'mid-range')} | "
+#                              f"Transformation: {opt.get('transformation_level', 'moderate')}*\n")
 
-    response_parts.append(f"\n---\n\n{suggestions_result.get('follow_up_message', '')}")
-    response_parts.append("\n\nYou can say things like:")
-    response_parts.append("\n- \"Show me option 1\"")
-    response_parts.append("\n- \"Generate option 2 and 3\"")
-    response_parts.append("\n- \"I like the modern style, generate it\"")
+#     response_parts.append(f"\n---\n\n{suggestions_result.get('follow_up_message', '')}")
+#     response_parts.append("\n\nYou can say things like:")
+#     response_parts.append("\n- \"Show me option 1\"")
+#     response_parts.append("\n- \"Generate option 2 and 3\"")
+#     response_parts.append("\n- \"I like the modern style, generate it\"")
 
-    return "".join(response_parts)
+#     return "".join(response_parts)
 
 
 def _format_suggestions_as_cards(suggestions_result: dict, inspirations: dict | None = None) -> dict:

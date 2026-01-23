@@ -2496,7 +2496,7 @@ export default function EstimatePage() {
                 <SuggestionsReadyButton
                   onClick={handleSuggestionsReady}
                   disabled={isSending}
-                  isVisible={suggestionsReady && preGeneratedSuggestions.length > 0 && !usedActionIds.has("suggest") && !hasGeneratedImages}
+                  isVisible={suggestionsReady && preGeneratedSuggestions.length > 0 && !hasGeneratedImages}
                 />
                 <QuickActionButtons
                   onAction={handleQuickAction}

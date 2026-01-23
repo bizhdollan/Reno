@@ -218,14 +218,14 @@ def build_fallback_queries(
     return [
         f"{loc_specific} {project_type} renovation contractor near me",
         f"{loc_general} {project_type} remodel contractor portfolio",
-        f"{loc_general} {project_type} renovation before after",
-        f"{loc_general} home renovation design trends materials 2024",
-        f"{loc_general} {project_type} renovation cost guide 2024",
-        f"{loc_general} best {project_type} remodel ideas",
+        # f"{loc_general} {project_type} renovation before after",
+        f"{loc_general} home renovation design trends materials 2025",
+        f"{loc_general} {project_type} renovation cost guide 2025",
+        # f"{loc_general} best {project_type} remodel ideas",
         f"{project_type} renovation inspiration gallery",
         f"{loc_general} {project_type} contractor reviews",
         f"{loc_general} home improvement {project_type}",
-        f"{project_type} makeover ideas modern",
+        # f"{project_type} makeover ideas modern",
     ]
 
 

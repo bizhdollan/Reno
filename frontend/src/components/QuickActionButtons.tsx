@@ -10,35 +10,26 @@ interface QuickActionButtonsProps {
   onAction: (message: string, actionId: string) => void;
   disabled?: boolean;
   entities?: DetectedEntity[];
-  usedActionIds?: Set<string>;
-  hasGeneratedImages?: boolean;
 }
 
 export function QuickActionButtons({
   onAction,
   disabled = false,
   entities = [],
-  usedActionIds = new Set(),
 }: QuickActionButtonsProps) {
-  // Build action buttons dynamically - only entity-based buttons now
-  // "Suggest Ideas" has been removed - suggestions are shown via dedicated button + popup
-  const actions: { id: string; label: string; message: string; variant: "entity" }[] = [];
+  // Build action buttons dynamically (always reusable)
+  const actions: { id: string; label: string; message: string }[] = [];
 
-  // Add entity-based buttons (not already used)
+  // Add entity-based buttons (NO hiding after click)
   entities.slice(0, 5).forEach((entity) => {
     const actionId = `entity-${entity.type}`;
-    if (!usedActionIds.has(actionId)) {
-      // Use a specific prompt format that works well with image generation
-      // "material, color and style" gives the model clear direction on what to change
-      const message = `Change the ${entity.label.toLowerCase()} material, color and style`;
+    const message = `Change the ${entity.label.toLowerCase()} material, color and style`;
 
-      actions.push({
-        id: actionId,
-        label: `Change ${entity.label}`,
-        message: message,
-        variant: "entity",
-      });
-    }
+    actions.push({
+      id: actionId,
+      label: `Change ${entity.label}`,
+      message,
+    });
   });
 
   // Don't render if no actions available
@@ -47,7 +38,6 @@ export function QuickActionButtons({
   }
 
   const getButtonClasses = () => {
-    // Entity buttons - teal/cyan color
     return "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap bg-teal-100 dark:bg-teal-500/20 text-teal-700 dark:text-teal-400 hover:bg-teal-200 dark:hover:bg-teal-500/30";
   };
 
