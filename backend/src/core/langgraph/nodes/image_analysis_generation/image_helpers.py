@@ -3,6 +3,7 @@ Image helper functions for loading and converting images.
 """
 
 import base64
+import os
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,8 @@ logger = get_logger(__name__)
 # Configuration
 IMAGES_DIR = Path("images")
 GENERATED_IMAGES_DIR = IMAGES_DIR / "generated"
+# Base URL for API requests (for fetching from /api/v1/files/... endpoints)
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 
 async def load_image_as_base64(image_url: str) -> str:
@@ -42,56 +45,54 @@ async def load_image_as_base64(image_url: str) -> str:
             logger.debug(f"[load_image_as_base64] Using existing data URL (length: {len(image_url)})")
             return image_url
 
-        # Local file path
+        # API endpoint path (e.g., /api/v1/files/{filename})
+        # This fetches from GCS via our endpoint, which generates fresh signed URLs
         if image_url.startswith("/api/v1/files/"):
             try:
-                filename = image_url.replace("/api/v1/files/", "")
-                file_path = IMAGES_DIR / filename
+                # Construct full URL to our own API endpoint
+                # The endpoint will redirect to a fresh signed URL from GCS
+                full_url = f"{API_BASE_URL}{image_url}"
+                logger.debug(f"[load_image_as_base64] Fetching from API endpoint: {full_url}")
 
-                # Security check - prevent path traversal
-                if ".." in str(filename) or filename.startswith("/"):
-                    raise ValueError(f"Invalid filename: {filename}")
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                    try:
+                        response = await client.get(full_url)
+                        response.raise_for_status()
+                    except httpx.TimeoutException:
+                        logger.error(f"[load_image_as_base64] Timeout fetching from API: {full_url}")
+                        raise httpx.HTTPError(f"Timeout fetching image from API endpoint: {image_url}")
+                    except httpx.HTTPStatusError as e:
+                        logger.error(f"[load_image_as_base64] HTTP {e.response.status_code} fetching from API: {full_url}")
+                        raise httpx.HTTPError(f"Failed to fetch image from API (HTTP {e.response.status_code}): {image_url}")
+                    except httpx.RequestError as e:
+                        logger.error(f"[load_image_as_base64] Network error fetching from API: {e}")
+                        raise httpx.HTTPError(f"Network error fetching image from API: {e}")
 
-                if not file_path.exists():
-                    logger.error(f"[load_image_as_base64] File not found: {file_path}")
-                    raise FileNotFoundError(f"Image file not found: {file_path}")
-
-                # Check file is actually an image by extension
-                ext = file_path.suffix.lower()
-                mime_types = {
-                    ".jpg": "image/jpeg",
-                    ".jpeg": "image/jpeg",
-                    ".png": "image/png",
-                    ".webp": "image/webp",
-                    ".gif": "image/gif",
-                }
-
-                if ext not in mime_types:
-                    raise ValueError(f"Unsupported file extension: {ext}")
-
-                mime_type = mime_types[ext]
-
-                # Read file with proper error handling
-                try:
-                    with open(file_path, "rb") as f:
-                        content = f.read()
+                    content = response.content
 
                     if not content:
-                        raise IOError(f"File is empty: {file_path}")
+                        raise ValueError(f"Image from API endpoint is empty: {image_url}")
+
+                    # Extract content type
+                    content_type = response.headers.get("content-type", "image/jpeg")
+                    if ";" in content_type:
+                        content_type = content_type.split(";")[0]
+
+                    # Validate it's an image
+                    if not content_type.startswith("image/"):
+                        raise ValueError(f"API endpoint does not return an image (content-type: {content_type}): {image_url}")
 
                     b64 = base64.b64encode(content).decode("utf-8")
-                    logger.debug(f"[load_image_as_base64] Successfully loaded local file: {filename}")
-                    return f"data:{mime_type};base64,{b64}"
+                    logger.debug(f"[load_image_as_base64] Successfully loaded image from API endpoint (size: {len(content)} bytes)")
+                    return f"data:{content_type};base64,{b64}"
 
-                except IOError as e:
-                    logger.error(f"[load_image_as_base64] Failed to read file {file_path}: {e}")
-                    raise IOError(f"Failed to read image file: {e}")
-
-            except (ValueError, FileNotFoundError, IOError):
+            except httpx.HTTPError:
+                raise
+            except ValueError:
                 raise
             except Exception as e:
-                logger.exception(f"[load_image_as_base64] Unexpected error loading local file: {e}")
-                raise ValueError(f"Failed to load local image: {e}")
+                logger.exception(f"[load_image_as_base64] Unexpected error fetching from API endpoint: {e}")
+                raise httpx.HTTPError(f"Failed to fetch image from API endpoint: {e}")
 
         # Remote URL
         if image_url.startswith("http://") or image_url.startswith("https://"):

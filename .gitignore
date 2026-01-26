@@ -338,3 +338,5 @@ docs/research/targeted-image-editing-segmentation-research.md
 backend/tests/bedroom.webp
 backend/debug_cleaned_content.txt
 TODO/targeted-image-editing-implementation.md
+SIMPLIFIED_AGENT_ARCHITECTURE.md
+service-account-key.json

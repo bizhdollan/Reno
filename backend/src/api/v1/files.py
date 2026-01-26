@@ -1,26 +1,30 @@
 """
 File Upload API for handling image uploads.
 
-Saves files locally to /images directory (can be changed to S3 later).
+Saves files to Google Cloud Storage.
 Returns file_id and URL for use in chat messages.
 """
 
 import os
 import uuid
-import shutil
-from datetime import datetime
+import io
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from google.cloud import storage
+from google.cloud.exceptions import NotFound
 
+from src.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["files"])
 
-# Configuration - can be moved to env/config later
-UPLOAD_DIR = Path("images")  # Root level /images folder
+# Configuration
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov"}
 ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
@@ -28,8 +32,64 @@ ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_VIDEO_SIZE = 25 * 1024 * 1024  # 25MB
 
-# Ensure upload directory exists
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# GCS Configuration
+# Priority: GCS_BUCKET_NAME > GCS_BUCKET_DEV > GCS_BUCKET_PROD
+GCS_BUCKET_NAME = os.getenv(
+    "GCS_BUCKET_NAME", 
+    os.getenv("GCS_BUCKET_DEV", os.getenv("GCS_BUCKET_PROD", "usebowerbird-images-dev"))
+)
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service-account-key.json")
+
+# Initialize GCS client
+def get_gcs_client() -> storage.Client:
+    """Get GCS client with service account credentials.
+    
+    Priority:
+    1. GOOGLE_APPLICATION_CREDENTIALS_JSON env var (for Docker/Cloud Run)
+    2. Service account key file path (for local dev)
+    3. Default credentials (for Cloud Run with attached service account)
+    """
+    try:
+        import json
+        from google.oauth2 import service_account
+        
+        # Option 1: Service account JSON as environment variable (for Docker/Cloud Run)
+        credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        if credentials_json:
+            try:
+                credentials_info = json.loads(credentials_json)
+                credentials = service_account.Credentials.from_service_account_info(credentials_info)
+                logger.info("[get_gcs_client] Using GOOGLE_APPLICATION_CREDENTIALS_JSON from environment")
+                return storage.Client(credentials=credentials, project=credentials_info.get('project_id'))
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.warning(f"[get_gcs_client] Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
+        
+        # Option 2: Service account key file path
+        if os.path.isabs(GOOGLE_APPLICATION_CREDENTIALS):
+            credentials_path = GOOGLE_APPLICATION_CREDENTIALS
+        else:
+            # Relative to backend directory
+            backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            credentials_path = os.path.join(backend_dir, GOOGLE_APPLICATION_CREDENTIALS)
+        
+        if os.path.exists(credentials_path):
+            logger.info(f"[get_gcs_client] Using service account key file: {credentials_path}")
+            return storage.Client.from_service_account_json(credentials_path)
+        
+        # Option 3: Default credentials (for Cloud Run with attached service account or local gcloud auth)
+        # Cloud Run automatically provides credentials via the attached service account
+        logger.info("[get_gcs_client] Using default credentials (Cloud Run service account or local gcloud auth)")
+        return storage.Client()
+        
+    except Exception as e:
+        logger.error(f"[get_gcs_client] Failed to initialize GCS client: {e}", exc_info=True)
+        raise
+
+def get_bucket() -> storage.Bucket:
+    """Get GCS bucket instance."""
+    client = get_gcs_client()
+    bucket = client.bucket(GCS_BUCKET_NAME)
+    return bucket
 
 
 class FileUploadResponse(BaseModel):
@@ -74,10 +134,6 @@ def generate_file_id() -> str:
     return f"{timestamp}_{unique_id}"
 
 
-def get_file_path(file_id: str, extension: str) -> Path:
-    """Get full file path for a file ID."""
-    return UPLOAD_DIR / f"{file_id}{extension}"
-
 def get_media_type(extension: str) -> str:
     """Get proper MIME type for file extension."""
     media_types = {
@@ -97,61 +153,80 @@ def get_media_type(extension: str) -> str:
 @router.post("/upload", response_model=FileUploadResponse)
 async def upload_file(file: UploadFile = File(...)) -> FileUploadResponse:
     """
-    Upload a single image or video file.
+    Upload a single image or video file to Google Cloud Storage.
     
     Images: Max 10MB
     Videos: Max 25MB
     
     Returns file_id and URL that can be used in chat messages.
     """
-    # Validate extension
-    extension = get_file_extension(file.filename or "")
-    if extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File type not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+    try:
+        # Validate extension
+        extension = get_file_extension(file.filename or "")
+        if extension not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            )
+        
+        # Get file type and size limit
+        file_type = get_file_type(extension)
+        max_size = get_max_size_for_extension(extension)
+        
+        # Read file content
+        content = await file.read()
+        
+        # Validate size
+        if len(content) > max_size:
+            max_size_mb = max_size // (1024 * 1024)
+            raise HTTPException(
+                status_code=400,
+                detail=f"{file_type.capitalize()} file too large. Maximum size: {max_size_mb}MB"
+            )
+        
+        # Generate file ID and GCS path
+        file_id = generate_file_id()
+        gcs_path = f"images/{file_id}{extension}"
+        
+        # Determine content type
+        content_type = file.content_type or get_media_type(extension)
+        
+        # Upload to GCS
+        bucket = get_bucket()
+        blob = bucket.blob(gcs_path)
+        blob.content_type = content_type
+        blob.upload_from_string(content, content_type=content_type)
+        
+        # Return relative URL instead of signed URL
+        # This ensures images always work - the /files/{filename} endpoint generates fresh signed URLs on-demand
+        # No expiration issues, and images remain accessible indefinitely
+        relative_url = f"/api/v1/files/{file_id}{extension}"
+        
+        logger.info(f"[upload_file] Successfully uploaded {file.filename} to GCS: {gcs_path}")
+        
+        return FileUploadResponse(
+            file_id=file_id,
+            filename=file.filename or f"{file_id}{extension}",
+            url=relative_url,
+            size=len(content),
+            content_type=content_type,
+            file_type=file_type
         )
-    
-    # Get file type and size limit
-    file_type = get_file_type(extension)
-    max_size = get_max_size_for_extension(extension)
-    
-    # Read file content
-    content = await file.read()
-    
-    # Validate size
-    if len(content) > max_size:
-        max_size_mb = max_size // (1024 * 1024)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[upload_file] Error uploading file: {e}", exc_info=True)
         raise HTTPException(
-            status_code=400,
-            detail=f"{file_type.capitalize()} file too large. Maximum size: {max_size_mb}MB"
+            status_code=500,
+            detail=f"Failed to upload file: {str(e)}"
         )
-    
-    # Generate file ID and save
-    file_id = generate_file_id()
-    file_path = get_file_path(file_id, extension)
-    
-    with open(file_path, "wb") as f:
-        f.write(content)
-    
-    # Determine content type
-    content_type = file.content_type or get_media_type(extension)
-    
-    return FileUploadResponse(
-        file_id=file_id,
-        filename=file.filename or f"{file_id}{extension}",
-        url=f"/api/v1/files/{file_id}{extension}",
-        size=len(content),
-        content_type=content_type,
-        file_type=file_type
-    )
 
 @router.post("/upload/multiple", response_model=MultiFileUploadResponse)
 async def upload_multiple_files(
     files: List[UploadFile] = File(...)
 ) -> MultiFileUploadResponse:
     """
-    Upload multiple image/video files at once.
+    Upload multiple image/video files at once to Google Cloud Storage.
     
     Images: Max 10MB each
     Videos: Max 25MB each
@@ -159,115 +234,153 @@ async def upload_multiple_files(
     Returns list of file_ids and URLs.
     """
     results = []
+    bucket = get_bucket()
     
-    for file in files:
-        # Validate extension
-        extension = get_file_extension(file.filename or "")
-        if extension not in ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File '{file.filename}' type not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
-            )
+    try:
+        for file in files:
+            # Validate extension
+            extension = get_file_extension(file.filename or "")
+            if extension not in ALLOWED_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File '{file.filename}' type not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+                )
+            
+            # Get file type and size limit
+            file_type = get_file_type(extension)
+            max_size = get_max_size_for_extension(extension)
+            
+            # Read and validate size
+            content = await file.read()
+            if len(content) > max_size:
+                max_size_mb = max_size // (1024 * 1024)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{file_type.capitalize()} '{file.filename}' too large. Maximum: {max_size_mb}MB"
+                )
+            
+            # Generate ID and GCS path
+            file_id = generate_file_id()
+            gcs_path = f"images/{file_id}{extension}"
+            
+            # Determine content type
+            content_type = file.content_type or get_media_type(extension)
+            
+            # Upload to GCS
+            blob = bucket.blob(gcs_path)
+            blob.content_type = content_type
+            blob.upload_from_string(content, content_type=content_type)
+            
+            # Return relative URL instead of signed URL
+            # This ensures images always work - the /files/{filename} endpoint generates fresh signed URLs on-demand
+            relative_url = f"/api/v1/files/{file_id}{extension}"
+            
+            results.append(FileUploadResponse(
+                file_id=file_id,
+                filename=file.filename or f"{file_id}{extension}",
+                url=relative_url,
+                size=len(content),
+                content_type=content_type,
+                file_type=file_type
+            ))
         
-        # Get file type and size limit
-        file_type = get_file_type(extension)
-        max_size = get_max_size_for_extension(extension)
-        
-        # Read and validate size
-        content = await file.read()
-        if len(content) > max_size:
-            max_size_mb = max_size // (1024 * 1024)
-            raise HTTPException(
-                status_code=400,
-                detail=f"{file_type.capitalize()} '{file.filename}' too large. Maximum: {max_size_mb}MB"
-            )
-        
-        # Generate ID and save
-        file_id = generate_file_id()
-        file_path = get_file_path(file_id, extension)
-        
-        with open(file_path, "wb") as f:
-            f.write(content)
-        
-        # Determine content type
-        content_type = file.content_type or get_media_type(extension)
-        
-        results.append(FileUploadResponse(
-            file_id=file_id,
-            filename=file.filename or f"{file_id}{extension}",
-            url=f"/api/v1/files/{file_id}{extension}",
-            size=len(content),
-            content_type=content_type,
-            file_type=file_type
-        ))
-    
-    return MultiFileUploadResponse(files=results)
+        logger.info(f"[upload_multiple_files] Successfully uploaded {len(results)} files to GCS")
+        return MultiFileUploadResponse(files=results)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[upload_multiple_files] Error uploading files: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload files: {str(e)}"
+        )
 
 @router.get("/files/{filename}")
-async def get_file(filename: str) -> FileResponse:
+async def get_file(filename: str):
     """
-    Serve uploaded files (images and videos).
+    Redirect to GCS signed URL for uploaded files.
     
-    This endpoint serves files from the /images directory.
+    This endpoint generates a signed URL and redirects to it.
+    Signed URLs are time-limited and more secure than public URLs.
     """
-    file_path = UPLOAD_DIR / filename
-    
-    # If not found in main directory, try the generated subdirectory
-    if not file_path.exists():
-        file_path = UPLOAD_DIR / "generated" / filename
-    
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Security: ensure path doesn't escape upload directory
-    if not file_path.resolve().is_relative_to(UPLOAD_DIR.resolve()):
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    # Determine media type
-    extension = get_file_extension(filename)
-    media_type = get_media_type(extension)
-    
-    return FileResponse(file_path, media_type=media_type)
+    try:
+        # Try to find the file in GCS
+        bucket = get_bucket()
+        
+        # Try images/ prefix first
+        gcs_path = f"images/{filename}"
+        blob = bucket.blob(gcs_path)
+        
+        if not blob.exists():
+            # Try generated/ prefix
+            gcs_path = f"images/generated/{filename}"
+            blob = bucket.blob(gcs_path)
+        
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Generate signed URL (valid for 24 hours)
+        # This endpoint is the primary way to access images, so longer expiration is fine
+        # Fresh URLs are generated on each request, so images always work
+        expiration = datetime.utcnow() + timedelta(hours=24)  # 24 hours from now
+        signed_url = blob.generate_signed_url(
+            expiration=expiration,
+            method='GET'
+        )
+        
+        return RedirectResponse(url=signed_url, status_code=302)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[get_file] Error retrieving file {filename}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve file: {str(e)}"
+        )
 
 
 @router.delete("/files/{file_id}")
 async def delete_file(file_id: str) -> dict:
     """
-    Delete an uploaded file.
+    Delete an uploaded file from Google Cloud Storage.
     
     Searches for the file with any allowed extension and deletes it.
     """
-    deleted = False
-    
-    for ext in ALLOWED_EXTENSIONS:
-        file_path = get_file_path(file_id, ext)
-        if file_path.exists():
-            file_path.unlink()
-            deleted = True
-            break
-    
-    if not deleted:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    return {"message": "File deleted successfully", "file_id": file_id}
+    try:
+        bucket = get_bucket()
+        deleted = False
+        
+        for ext in ALLOWED_EXTENSIONS:
+            gcs_path = f"images/{file_id}{ext}"
+            blob = bucket.blob(gcs_path)
+            
+            if blob.exists():
+                blob.delete()
+                deleted = True
+                logger.info(f"[delete_file] Deleted file from GCS: {gcs_path}")
+                break
+        
+        if not deleted:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return {"message": "File deleted successfully", "file_id": file_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[delete_file] Error deleting file {file_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete file: {str(e)}"
+        )
 
 
 
 # === Generated Images ===
 
-GENERATED_DIR = UPLOAD_DIR / "generated"
-GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-
-
 class GeneratedImageResponse(BaseModel):
     """Response for generated/placeholder image."""
     file_id: str
     url: str
-
-
-def get_placeholder_image_path() -> Path:
-    """Get path to default placeholder image."""
-    return UPLOAD_DIR / "placeholder-renovation.jpg"
 
 
 @router.get("/generated/placeholder", response_model=GeneratedImageResponse)
@@ -277,63 +390,104 @@ async def get_placeholder_image() -> GeneratedImageResponse:
     
     Used when actual image generation is disabled.
     """
-    placeholder_path = get_placeholder_image_path()
-    
-    if not placeholder_path.exists():
-        raise HTTPException(
-            status_code=404, 
-            detail="Placeholder image not found. Please add 'placeholder-renovation.jpg' to /images folder."
+    try:
+        bucket = get_bucket()
+        gcs_path = "images/placeholder-renovation.jpg"
+        blob = bucket.blob(gcs_path)
+        
+        if not blob.exists():
+            raise HTTPException(
+                status_code=404, 
+                detail="Placeholder image not found. Please upload 'placeholder-renovation.jpg' to GCS bucket."
+            )
+        
+        # Return relative URL - the endpoint generates fresh signed URLs on-demand
+        relative_url = "/api/v1/files/placeholder-renovation.jpg"
+        
+        return GeneratedImageResponse(
+            file_id="placeholder",
+            url=relative_url
         )
-    
-    return GeneratedImageResponse(
-        file_id="placeholder",
-        url="/api/v1/files/placeholder-renovation.jpg"
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[get_placeholder_image] Error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve placeholder image: {str(e)}"
+        )
 
 
 @router.post("/generated/save", response_model=GeneratedImageResponse)
 async def save_generated_image(file: UploadFile = File(...)) -> GeneratedImageResponse:
     """
-    Save an AI-generated image.
+    Save an AI-generated image to Google Cloud Storage.
     
     This endpoint is for saving images generated by AI models.
-    Can be used when actual image generation is implemented.
     """
-    extension = get_file_extension(file.filename or ".jpg")
-    if extension not in ALLOWED_EXTENSIONS:
-        extension = ".jpg"
-    
-    content = await file.read()
-    
-    file_id = f"gen_{generate_file_id()}"
-    file_path = GENERATED_DIR / f"{file_id}{extension}"
-    
-    with open(file_path, "wb") as f:
-        f.write(content)
-    
-    return GeneratedImageResponse(
-        file_id=file_id,
-        url=f"/api/v1/files/generated/{file_id}{extension}"
-    )
+    try:
+        extension = get_file_extension(file.filename or ".jpg")
+        if extension not in ALLOWED_EXTENSIONS:
+            extension = ".jpg"
+        
+        content = await file.read()
+        
+        file_id = f"gen_{generate_file_id()}"
+        gcs_path = f"images/generated/{file_id}{extension}"
+        
+        # Upload to GCS
+        bucket = get_bucket()
+        blob = bucket.blob(gcs_path)
+        content_type = file.content_type or get_media_type(extension)
+        blob.content_type = content_type
+        blob.upload_from_string(content, content_type=content_type)
+        
+        # Return relative URL instead of signed URL
+        # This ensures images always work - the /files/generated/{filename} endpoint generates fresh signed URLs on-demand
+        relative_url = f"/api/v1/files/generated/{file_id}{extension}"
+        
+        logger.info(f"[save_generated_image] Saved generated image to GCS: {gcs_path}")
+        
+        return GeneratedImageResponse(
+            file_id=file_id,
+            url=relative_url
+        )
+    except Exception as e:
+        logger.error(f"[save_generated_image] Error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save generated image: {str(e)}"
+        )
 
 
 @router.get("/files/generated/{filename}")
-async def get_generated_file(filename: str) -> FileResponse:
+async def get_generated_file(filename: str):
     """
-    Serve generated images.
+    Redirect to GCS signed URL for generated images.
+    
+    Signed URLs are time-limited and more secure than public URLs.
     """
-    file_path = GENERATED_DIR / filename
-    
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Generated file not found")
-    
-    extension = get_file_extension(filename)
-    media_types = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-    }
-    media_type = media_types.get(extension, "image/jpeg")
-    
-    return FileResponse(file_path, media_type=media_type)
+    try:
+        bucket = get_bucket()
+        gcs_path = f"images/generated/{filename}"
+        blob = bucket.blob(gcs_path)
+        
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="Generated file not found")
+        
+        # Generate signed URL (valid for 1 hour for temporary access)
+        expiration = datetime.utcnow() + timedelta(hours=1)  # 1 hour from now
+        signed_url = blob.generate_signed_url(
+            expiration=expiration,
+            method='GET'
+        )
+        
+        return RedirectResponse(url=signed_url, status_code=302)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[get_generated_file] Error retrieving {filename}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve generated file: {str(e)}"
+        )
